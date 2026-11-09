@@ -1,7 +1,8 @@
-const { GoogleGenAI } = require('@google/genai');
+const OpenAI = require('openai');
 const logger = require('../core/logger').createServiceLogger('LLM');
 const config = require('../core/config');
 const { promptLoader } = require('../../prompt-loader');
+const { resumeContext } = require('../core/resume-context');
 
 class LLMService {
   constructor() {
@@ -15,35 +16,29 @@ class LLMService {
   }
 
   initializeClient() {
-    const apiKey = config.getApiKey('GEMINI');
-    
-    if (!apiKey || apiKey === 'your-api-key-here') {
-      logger.warn('Gemini API key not configured', { 
-        keyExists: !!apiKey,
-        isPlaceholder: apiKey === 'your-api-key-here'
-      });
+    this.isInitialized = false;
+    this.client = null;
+    this.model = process.env.OPENAI_MODEL || config.get('llm.openai.model');
+    this.imageModel = process.env.OPENAI_IMAGE_MODEL || config.get('llm.openai.imageModel');
+    const apiKey = config.getApiKey('OPENAI');
+    if (!apiKey || apiKey.startsWith('your_') || apiKey === 'your-api-key-here') {
+      logger.warn('OpenAI API key not configured');
       return;
     }
-
-    try {
-      this.client = new GoogleGenAI({ apiKey });
-      
-      // Use the configured model name (default: gemini-3.5-flash)
-      this.model = config.get('llm.gemini.model');
-      this.isInitialized = true;
-      
-      logger.info('Gemini AI client initialized successfully', {
-        model: this.model
-      });
-    } catch (error) {
-      logger.error('Failed to initialize Gemini client', { 
-        error: error.message 
-      });
-    }
+    this.client = new OpenAI({
+      apiKey,
+      timeout: config.get('llm.openai.timeout'),
+      maxRetries: 2,
+      // Recent SDKs classify Electron as browser-like. This service runs only
+      // in the isolated main process; never enable API access in a renderer.
+      dangerouslyAllowBrowser: !!process.versions.electron && process.type === 'browser'
+    });
+    this.isInitialized = true;
+    logger.info('OpenAI client initialized', { model: this.model });
   }
 
   getGenerationConfig(overrides = {}) {
-    const defaults = config.get('llm.gemini.generation') || {};
+    const defaults = config.get('llm.openai.generation') || {};
     const fallback = {
       temperature: 0.7,
       topK: 40,
@@ -80,7 +75,7 @@ class LLMService {
         : [];
 
     if (!candidates.length) {
-      throw new Error('No candidates in Gemini response');
+      throw new Error('No candidates in OpenAI response');
     }
 
     const candidateWithText = candidates.find(candidate => {
@@ -111,7 +106,7 @@ class LLMService {
   }
 
   /**
-   * Process an image directly with Gemini using the active skill prompt.
+   * Process an image directly with OpenAI using the active skill prompt.
    * The image buffer is sent as inlineData alongside a concise instruction.
    * For image-based queries, we include the skill prompt (e.g., DSA) as systemInstruction.
    * @param {Buffer} imageBuffer - PNG/JPEG image bytes
@@ -123,10 +118,10 @@ class LLMService {
    */
   async processImageWithSkill(imageBuffer, mimeType, activeSkill, sessionMemory = [], programmingLanguage = null) {
     if (!this.isInitialized) {
-      throw new Error('LLM service not initialized. Check Gemini API key configuration.');
+      throw new Error('LLM service not initialized. Check OpenAI API key configuration.');
     }
 
-    if (!imageBuffer || !Buffer.isBuffer(imageBuffer)) {
+    if (!imageBuffer || (!Buffer.isBuffer(imageBuffer) && !Array.isArray(imageBuffer))) {
       throw new Error('Invalid image buffer provided to processImageWithSkill');
     }
 
@@ -139,21 +134,20 @@ class LLMService {
       const skillPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
 
       // Build request with text + image parts
-      const base64 = imageBuffer.toString('base64');
-
       const request = {
+        model: this.imageModel,
         contents: [
           {
             role: 'user',
             parts: [
               { text: this.formatImageInstruction(activeSkill, programmingLanguage) },
-              { inlineData: { data: base64, mimeType } }
+              ...this.imageParts(imageBuffer, mimeType)
             ]
           }
         ]
       };
 
-      this.applyGenerationDefaults(request);
+      this.applyGenerationDefaults(request, { maxOutputTokens: 8192 });
 
       if (skillPrompt && skillPrompt.trim().length > 0) {
         request.systemInstruction = { parts: [{ text: skillPrompt }] };
@@ -161,7 +155,7 @@ class LLMService {
 
       // Execute with retries/timeout - try alternative method first for network reliability
       let responseText;
-      const preferAlternative = !!config.get('llm.gemini.enableFallbackMethod');
+      const preferAlternative = !!config.get('llm.openai.enableFallbackMethod');
       try {
         if (preferAlternative) {
           logger.debug('Attempting alternative HTTPS method first for reliability');
@@ -177,7 +171,7 @@ class LLMService {
         try {
           responseText = await secondaryFn(request);
         } catch (secondaryError) {
-          logger.error('Both Gemini request methods failed', {
+          logger.error('Both OpenAI request methods failed', {
             firstError: error.message,
             secondError: secondaryError.message
           });
@@ -207,6 +201,8 @@ class LLMService {
           requestId: this.requestCount,
           usedFallback: false,
           isImageAnalysis: true,
+          model: this.imageModel,
+          imageCount: Array.isArray(imageBuffer) ? imageBuffer.length : 1,
           mimeType
         }
       };
@@ -218,19 +214,17 @@ class LLMService {
         requestId: this.requestCount
       });
 
-      if (config.get('llm.gemini.fallbackEnabled')) {
-        return this.generateFallbackResponse('[image]', activeSkill);
-      }
+      // Surface image errors so the queue can retain captures for retry.
       throw error;
     }
   }
 
   async processImageWithSkillStream(imageBuffer, mimeType, activeSkill, sessionMemory = [], programmingLanguage = null, onDelta = null) {
     if (!this.isInitialized) {
-      throw new Error('LLM service not initialized. Check Gemini API key configuration.');
+      throw new Error('LLM service not initialized. Check OpenAI API key configuration.');
     }
 
-    if (!imageBuffer || !Buffer.isBuffer(imageBuffer)) {
+    if (!imageBuffer || (!Buffer.isBuffer(imageBuffer) && !Array.isArray(imageBuffer))) {
       throw new Error('Invalid image buffer provided to processImageWithSkillStream');
     }
 
@@ -240,20 +234,19 @@ class LLMService {
     try {
       const { promptLoader } = require('../../prompt-loader');
       const skillPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
-      const base64 = imageBuffer.toString('base64');
-
       const geminiRequest = {
+        model: this.imageModel,
         contents: [
           {
             role: 'user',
             parts: [
               { text: this.formatImageInstruction(activeSkill, programmingLanguage) },
-              { inlineData: { data: base64, mimeType } }
+              ...this.imageParts(imageBuffer, mimeType)
             ]
           }
         ]
       };
-      this.applyGenerationDefaults(geminiRequest);
+      this.applyGenerationDefaults(geminiRequest, { maxOutputTokens: 8192 });
       if (skillPrompt && skillPrompt.trim().length > 0) {
         geminiRequest.systemInstruction = { parts: [{ text: skillPrompt }] };
       }
@@ -285,6 +278,8 @@ class LLMService {
           usedFallback: false,
           streamed: true,
           isImageAnalysis: true,
+          model: this.imageModel,
+          imageCount: Array.isArray(imageBuffer) ? imageBuffer.length : 1,
           mimeType
         }
       };
@@ -297,14 +292,26 @@ class LLMService {
     }
   }
 
+  imageParts(images, mimeType) {
+    const batch = Array.isArray(images) ? images : [{ imageBuffer: images, mimeType }];
+    if (!batch.length) throw new Error('No screenshots provided.');
+    return batch.flatMap((image, index) => {
+      if (!Buffer.isBuffer(image.imageBuffer) || !image.imageBuffer.length) throw new Error('Invalid screenshot.');
+      return [
+        { text: `Screenshot ${index + 1} of ${batch.length}` },
+        { inlineData: { data: image.imageBuffer.toString('base64'), mimeType: image.mimeType || 'image/png' } }
+      ];
+    });
+  }
+
   formatImageInstruction(activeSkill, programmingLanguage) {
     const langNote = programmingLanguage ? ` Use only ${programmingLanguage.toUpperCase()} for any code.` : '';
-    return `Analyze this image for a ${activeSkill.toUpperCase()} question. Extract the problem concisely and provide the best possible solution with explanation and final code.${langNote}`;
+    return `Read all screenshots in capture order as context for the same task. Combine problem statements, constraints, examples, and code across screenshots. Solve the visible question or task; for coding problems give an explanation, complexity, and final code. If essential content is unreadable or missing, say what is needed instead of guessing.${langNote}`;
   }
 
   async processTextWithSkill(text, activeSkill, sessionMemory = [], programmingLanguage = null) {
     if (!this.isInitialized) {
-      throw new Error('LLM service not initialized. Check Gemini API key configuration.');
+      throw new Error('LLM service not initialized. Check OpenAI API key configuration.');
     }
 
     const startTime = Date.now();
@@ -319,9 +326,9 @@ class LLMService {
         requestId: this.requestCount
       });
 
-      const geminiRequest = this.buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage);
+      const geminiRequest = this.buildPromptRequest(text, activeSkill, sessionMemory, programmingLanguage);
 
-      const preferAlternative = !!config.get('llm.gemini.enableFallbackMethod');
+      const preferAlternative = !!config.get('llm.openai.enableFallbackMethod');
       let response;
       try {
         if (preferAlternative) {
@@ -340,7 +347,7 @@ class LLMService {
         try {
           response = await secondaryFn(geminiRequest);
         } catch (secondaryError) {
-          logger.error('Both Gemini request methods failed for text processing', {
+          logger.error('Both OpenAI request methods failed for text processing', {
             firstError: error.message,
             secondError: secondaryError.message,
             requestId: this.requestCount
@@ -381,7 +388,7 @@ class LLMService {
         requestId: this.requestCount
       });
 
-      if (config.get('llm.gemini.fallbackEnabled')) {
+      if (config.get('llm.openai.fallbackEnabled')) {
         return this.generateFallbackResponse(text, activeSkill);
       }
 
@@ -391,14 +398,14 @@ class LLMService {
 
   async processTextWithSkillStream(text, activeSkill, sessionMemory = [], programmingLanguage = null, onDelta = null) {
     if (!this.isInitialized) {
-      throw new Error('LLM service not initialized. Check Gemini API key configuration.');
+      throw new Error('LLM service not initialized. Check OpenAI API key configuration.');
     }
 
     const startTime = Date.now();
     this.requestCount++;
 
     try {
-      const geminiRequest = this.buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage);
+      const geminiRequest = this.buildPromptRequest(text, activeSkill, sessionMemory, programmingLanguage);
 
       const fullText = await this.executeStreamingRequest(geminiRequest, (delta) => {
         if (typeof onDelta === 'function' && delta) {
@@ -439,7 +446,7 @@ class LLMService {
 
   async processTranscriptionWithIntelligentResponse(text, activeSkill, sessionMemory = [], programmingLanguage = null) {
     if (!this.isInitialized) {
-      throw new Error('LLM service not initialized. Check Gemini API key configuration.');
+      throw new Error('LLM service not initialized. Check OpenAI API key configuration.');
     }
 
     const startTime = Date.now();
@@ -456,7 +463,7 @@ class LLMService {
 
       const geminiRequest = this.buildIntelligentTranscriptionRequest(text, activeSkill, sessionMemory, programmingLanguage);
 
-      const preferAlternative = !!config.get('llm.gemini.enableFallbackMethod');
+      const preferAlternative = !!config.get('llm.openai.enableFallbackMethod');
       let response;
       try {
         if (preferAlternative) {
@@ -475,7 +482,7 @@ class LLMService {
         try {
           response = await secondaryFn(geminiRequest);
         } catch (secondaryError) {
-          logger.error('Both Gemini request methods failed for transcription processing', {
+          logger.error('Both OpenAI request methods failed for transcription processing', {
             firstError: error.message,
             secondError: secondaryError.message,
             requestId: this.requestCount
@@ -517,7 +524,7 @@ class LLMService {
         requestId: this.requestCount
       });
 
-      if (config.get('llm.gemini.fallbackEnabled')) {
+      if (config.get('llm.openai.fallbackEnabled')) {
         return this.generateIntelligentFallbackResponse(text, activeSkill);
       }
       
@@ -536,31 +543,30 @@ class LLMService {
       const fenceTagMap = { cpp: 'cpp', c: 'c', python: 'python', java: 'java', javascript: 'javascript', js: 'javascript' };
       const fenceTag = fenceTagMap[norm] || norm || 'text';
 
-      // Replace all triple-backtick fences' language token with the selected tag
-      const replacedBackticks = text.replace(/```([^\n]*)\n/g, (match, info) => {
-        const current = (info || '').trim();
-        // If already the desired fenceTag as the first token, keep as is
-        if (current.split(/\s+/)[0].toLowerCase() === fenceTag) return match;
-        return '```' + fenceTag + '\n';
-      });
-
-      // Optionally normalize tildes fences to backticks with correct tag
-      const normalizedTildes = replacedBackticks.replace(/~~~([^\n]*)\n/g, () => '```' + fenceTag + '\n');
-
-      return normalizedTildes;
+      let fence = null;
+      return text.split('\n').map(line => {
+        const match = line.match(/^( {0,3})(`{3,}|~{3,})(.*)$/);
+        if (!match) return line;
+        if (!fence) {
+          fence = match[2];
+          return match[1] + fence + fenceTag;
+        }
+        if (match[2][0] === fence[0] && match[2].length >= fence.length && !match[3].trim()) fence = null;
+        return line;
+      }).join('\n');
     } catch (_) {
       return text;
     }
   }
 
-  buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage) {
+  buildPromptRequest(text, activeSkill, sessionMemory, programmingLanguage) {
     // Check if we have the new conversation history format
     const sessionManager = require('../managers/session.manager');
     
     if (sessionManager && typeof sessionManager.getConversationHistory === 'function') {
-      const conversationHistory = sessionManager.getConversationHistory(15);
+      const conversationHistory = sessionManager.getQAHistory();
       const skillContext = sessionManager.getSkillContext(activeSkill, programmingLanguage);
-      return this.buildGeminiRequestWithHistory(text, activeSkill, conversationHistory, skillContext, programmingLanguage);
+      return this.buildPromptRequestWithHistory(text, activeSkill, conversationHistory, skillContext, programmingLanguage);
     }
 
     // Fallback to old method for compatibility - now with programming language support
@@ -599,7 +605,7 @@ class LLMService {
     return request;
   }
 
-  buildGeminiRequestWithHistory(text, activeSkill, conversationHistory, skillContext, programmingLanguage) {
+  buildPromptRequestWithHistory(text, activeSkill, conversationHistory, skillContext, programmingLanguage) {
     const request = {
       contents: []
     };
@@ -652,7 +658,7 @@ class LLMService {
       parts: [{ text: formattedMessage }]
     });
 
-    logger.debug('Built Gemini request with conversation history', {
+    logger.debug('Built OpenAI request with conversation history', {
       skill: activeSkill,
       programmingLanguage: programmingLanguage || 'not specified',
       historyLength: conversationHistory.length,
@@ -675,9 +681,11 @@ class LLMService {
     const sessionManager = require('../managers/session.manager');
     
     if (sessionManager && typeof sessionManager.getConversationHistory === 'function') {
-      const conversationHistory = sessionManager.getConversationHistory(10);
+      const conversationHistory = sessionManager.getQAHistory();
       const skillContext = sessionManager.getSkillContext(activeSkill, programmingLanguage);
-      return this.buildIntelligentTranscriptionRequestWithHistory(cleanText, activeSkill, conversationHistory, skillContext, programmingLanguage);
+      const request = this.buildIntelligentTranscriptionRequestWithHistory(cleanText, activeSkill, conversationHistory, skillContext, programmingLanguage);
+      request.responseSource = 'speech';
+      return request;
     }
 
     // Fallback to basic intelligent request
@@ -688,6 +696,7 @@ class LLMService {
     this.applyGenerationDefaults(request);
 
     // Add intelligent filtering system instruction
+    request.responseSource = 'speech';
     const intelligentPrompt = this.getIntelligentTranscriptionPrompt(activeSkill, programmingLanguage);
     if (!intelligentPrompt) {
       throw new Error('Failed to generate intelligent transcription prompt');
@@ -732,7 +741,6 @@ class LLMService {
                typeof event.content === 'string' && 
                event.content.trim().length > 0;
       })
-      .slice(-8) // Keep last 8 exchanges for context
       .map(event => {
         const content = event.content.trim();
         if (!content) {
@@ -762,7 +770,7 @@ class LLMService {
 
     // Ensure we have at least one content item
     if (request.contents.length === 0) {
-      throw new Error('No valid content to send to Gemini API');
+      throw new Error('No valid content to send to OpenAI API');
     }
 
     logger.debug('Built intelligent transcription request with conversation history', {
@@ -781,9 +789,16 @@ class LLMService {
   getIntelligentTranscriptionPrompt(activeSkill, programmingLanguage) {
     let prompt = `# Intelligent Transcription Response System
 
-Assume you are asked a question in ${activeSkill.toUpperCase()} mode. Your job is to intelligently respond to question/message with appropriate brevity.
-Assume you are in an interview and you need to perform best in ${activeSkill.toUpperCase()} mode.
-Always respond to the point, do not repeat the question or unnecessary information which is not related to ${activeSkill}.`;
+You help the user answer questions heard through computer playback during a live call.
+Use the transcript and conversation history together: the other person may ask a
+question across several speech fragments. Answer their latest question directly.
+The selected mode is ${activeSkill.toUpperCase()}; use it as context, but answer
+questions on other topics too. Do not reject a question because it is outside that mode.
+Do not repeat the question or add canned acknowledgments about listening.
+Default to a CONCEPTUAL spoken answer, including for algorithms, data structures, and programming questions.
+Explain the idea, reasoning, tradeoffs, and complexity in plain English. Do not output code, pseudocode, or an implementation unless the speaker explicitly asks you to write, implement, or show code.
+"How does binary search work?", "Explain two sum", and "How would you solve this?" call for a conceptual explanation, not source code. "Implement binary search in Python" explicitly requests implementation.
+Do not infer an implementation request from the selected coding mode, a problem statement, or code in earlier answers. A follow-up must explicitly request implementation (including a clear reference to a previous implementation request).`;
 
     // Add programming language context if provided
     if (programmingLanguage) {
@@ -792,44 +807,31 @@ Always respond to the point, do not repeat the question or unnecessary informati
       const fenceTagMap = { cpp: 'cpp', c: 'c', python: 'python', java: 'java', javascript: 'javascript', js: 'javascript' };
       const languageTitle = languageMap[lang] || (lang.charAt(0).toUpperCase() + lang.slice(1));
       const fenceTag = fenceTagMap[lang] || lang || 'text';
-      prompt += `\n\nCODING CONTEXT: Respond ONLY in ${languageTitle}. All code blocks must use triple backticks with language tag \`\`\`${fenceTag}\`\`\`. Do not include other languages unless explicitly asked.`;
+      prompt += `\n\nCODING CONTEXT: When code is needed, write it in ${languageTitle}. All code blocks must use triple backticks with language tag \`\`\`${fenceTag}\`\`\`. Do not include other programming languages unless explicitly asked.`;
     }
 
     prompt += `
 
 ## Response Rules:
 
-### If the transcription is casual conversation, greetings, or NOT related to ${activeSkill}:
-- Respond with: "Yeah, I'm listening. Ask your question relevant to ${activeSkill}."
-- Or similar brief acknowledgments like: "I'm here, what's your ${activeSkill} question?"
+### When the speaker asks a question or follows up:
+- Give a useful answer the user can say on the call.
+- Incorporate context from earlier speech fragments and follow-up questions.
+- Use conceptual examples and explanations. Include code only when implementation is explicitly requested.
+- If the transcript is incomplete, do not invent missing requirements or facts.
 
-### If the transcription IS relevant to ${activeSkill} or is a follow-up question:
-- Provide a comprehensive, detailed response
-- Use bullet points, examples, and explanations
-- Focus on actionable insights and complete answers
-- Do not truncate or shorten your response
-
-### Examples of casual/irrelevant messages:
-- "Hello", "Hi there", "How are you?"
-- "What's the weather like?"
-- "I'm just testing this"
-- Random conversations not related to ${activeSkill}
-
-### Examples of relevant messages:
-- Actual questions about ${activeSkill} concepts
-- Follow-up questions to previous responses
-- Requests for clarification on ${activeSkill} topics
-- Problem-solving requests related to ${activeSkill}
+### When the speaker is making a statement or greeting:
+- Keep any response brief and appropriate to what was said.
+- Do not turn every fragment into a new unrelated question or a long answer.
 
 ## Response Format:
-- Keep responses detailed
-- Use bullet points for structured answers
-- Be encouraging and helpful
-- Stay focused on ${activeSkill}
+- Match the amount of detail to the question.
+- Use bullet points when they make the answer easier to read.
+- Focus on what the other person actually asked.
 
-If the user's input is a coding or DSA problem statement and contains no code, produce a complete, runnable solution in the selected programming language without asking for more details. Always include the final implementation in a properly tagged code block.
+For an explicit implementation request, provide the requested code in a properly tagged fenced block. Otherwise answer conceptually, even if a full coding or DSA problem statement is spoken.
 
-Remember: Be intelligent about filtering - only provide detailed responses when the user actually needs help with ${activeSkill}.`;
+Remember: Answer the actual spoken question using the available conversation context.`;
 
     return prompt;
   }
@@ -838,137 +840,141 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     return `Context: ${activeSkill.toUpperCase()} analysis request\n\nText to analyze:\n${text}`;
   }
 
-  async executeRequest(geminiRequest) {
-    const maxRetries = config.get('llm.gemini.maxRetries');
-    const timeout = config.get('llm.gemini.timeout');
-    const primaryModel = this.model;
-    const fallbackModels = config.get('llm.gemini.fallbackModels') || [];
-    const modelsToTry = [primaryModel, ...fallbackModels];
+  getReasoningEffort(model) {
+    if (model === 'gpt-6-luna') return 'none';
+    return model === 'gpt-5-nano' ? 'minimal' : 'low';
+  }
 
-    logger.debug('Executing Gemini request', {
-      hasModel: !!this.model,
-      hasClient: !!this.client,
-      requestKeys: Object.keys(geminiRequest),
-      timeout,
-      maxRetries,
-      modelsToTry,
-      nodeVersion: process.version,
-      platform: process.platform
-    });
+  buildOpenAIRequest(request) {
+    const model = request.model || this.model;
+    const contents = typeof request.contents === 'string'
+      ? [{ role: 'user', parts: [{ text: request.contents }] }]
+      : request.contents || [];
+    const resumePrompt = resumeContext.getPromptBlock();
+    return {
+      model,
+      store: false,
+      reasoning: { effort: this.getReasoningEffort(model) },
+      instructions: [
+        request.systemInstruction?.parts?.map(p => p.text || '').join('\n'),
+        resumePrompt,
+        require('../core/code-presentation')
+      ].filter(Boolean).join('\n\n'),
+      input: contents.map(content => {
+        const assistant = content.role === 'model' || content.role === 'assistant';
+        return {
+          role: assistant ? 'assistant' : 'user',
+          content: (content.parts || []).map(part => {
+            if (part.inlineData) return {
+              type: 'input_image',
+              image_url: 'data:' + part.inlineData.mimeType + ';base64,' + part.inlineData.data,
+              detail: 'auto'
+            };
+            return { type: assistant ? 'output_text' : 'input_text', text: part.text || '' };
+          })
+        };
+      }),
+      max_output_tokens: request.generationConfig?.maxOutputTokens || 4096
+    };
+  }
 
-    let lastError = null;
+  async executeRequest(request) {
+    const result = await this.client.responses.create(this.buildOpenAIRequest(request));
+    if (result.status === 'incomplete') throw new Error('OpenAI response incomplete: ' + (result.incomplete_details?.reason || 'unknown'));
+    if (!result.output_text) throw new Error(result.error?.message || 'OpenAI returned no answer');
+    return this.ensureCodeAnnotations(result.output_text, request);
+  }
 
-    for (const modelName of modelsToTry) {
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Request timeout')), timeout)
-          );
-
-          logger.debug(`Gemini API attempt ${attempt} starting with model ${modelName}`, {
-            timestamp: new Date().toISOString(),
-            timeout,
-            model: modelName
-          });
-
-          const requestPromise = this.client.models.generateContent({
-            model: modelName,
-            contents: geminiRequest.contents,
-            config: geminiRequest.generationConfig,
-            systemInstruction: geminiRequest.systemInstruction
-          });
-          const result = await Promise.race([requestPromise, timeoutPromise]);
-
-          if (!result) {
-            throw new Error('Empty response from Gemini API');
-          }
-
-          const { text, finishReason } = this.extractTextFromCandidates(result);
-
-          if (finishReason === 'MAX_TOKENS') {
-            logger.warn('Gemini response reached max tokens limit', {
-              attempt,
-              finishReason,
-              model: modelName
-            });
-          }
-
-          logger.debug('Gemini API request successful', {
-            attempt,
-            model: modelName,
-            responseLength: text.length,
-            finishReason
-          });
-
-          return text;
-        } catch (error) {
-          const errorInfo = this.analyzeError(error);
-          lastError = error;
-
-          // Enhanced error logging for fetch failures
-          if (errorInfo.type === 'NETWORK_ERROR') {
-            logger.error('Network error details', {
-              attempt,
-              model: modelName,
-              errorMessage: error.message,
-              errorStack: error.stack,
-              errorName: error.name,
-              nodeEnv: process.env.NODE_ENV,
-              electronVersion: process.versions.electron,
-              chromeVersion: process.versions.chrome,
-              nodeVersion: process.versions.node,
-              userAgent: this.getUserAgent()
-            });
-          }
-
-          logger.warn(`Gemini API attempt ${attempt} failed for model ${modelName}`, {
-            error: error.message,
-            errorType: errorInfo.type,
-            isNetworkError: errorInfo.isNetworkError,
-            suggestedAction: errorInfo.suggestedAction,
-            remainingAttempts: maxRetries - attempt,
-            model: modelName
-          });
-
-          // For model-unavailable / overloaded / rate-limit errors, move to
-          // the next fallback model immediately instead of burning all retries.
-          const isModelUnavailable = errorInfo.type === 'RATE_LIMIT_ERROR' ||
-            error.message.includes('503') ||
-            error.message.includes('UNAVAILABLE') ||
-            error.message.includes('high demand');
-
-          if (isModelUnavailable && modelName !== modelsToTry[modelsToTry.length - 1]) {
-            logger.info(`Switching to fallback model after ${modelName} unavailable`, {
-              model: modelName,
-              error: error.message
-            });
-            break; // exit retry loop for this model and try next model
-          }
-
-          if (attempt === maxRetries) {
-            break; // exit retry loop for this model and try next model
-          }
-
-          // Use exponential backoff with jitter for network errors
-          const baseDelay = errorInfo.isNetworkError ? 2500 : 1500;
-          const delay = baseDelay * attempt + Math.random() * 1000;
-
-          logger.debug(`Waiting ${delay}ms before retry ${attempt + 1}`, {
-            baseDelay,
-            isNetworkError: errorInfo.isNetworkError,
-            model: modelName
-          });
-
-          await this.delay(delay);
+  async ensureCodeAnnotations(text, request) {
+    // Spoken implementation requests stay in Q&A as ordinary code blocks.
+    // Screenshot solutions use the separate annotated code presentation.
+    if (request.responseSource === 'speech') return text.replace(/<!--\s*coding-answer\s*-->/gi, '').trim();
+    const { splitResponse } = require('../../lib/response-parts');
+    // Accept older annotated replies without requiring the model to rewrite them.
+    if (!splitResponse(text).codeBlocks.length && /^\s*(?:#|\/\/)\s*@explain:/m.test(text)) {
+      text = text.replace(/((?:^[ \t]*(?:#|\/\/)[ \t]*@explain:[^\n]*\n[^\n]*(?:\n|$))+)/gm, block =>
+        '```' + (/^[ \t]*#/.test(block) ? 'python' : 'cpp') + '\n' + block + (block.endsWith('\n') ? '' : '\n') + '```\n');
+    }
+    const original = splitResponse(text);
+    const missing = [];
+    original.codeBlocks.forEach((block, blockIndex) => block.lines.forEach((line, index) => {
+      if (line.code.trim()) {
+        const setup = /^\s*(?:#include|using\s+namespace|(?:public|private|protected)\s*:|(?:class|struct|namespace)\s)/.test(line.code);
+        const goal = /^\s*(?:def\s|function\s)/.test(line.code) || (/\w+\s*\([^;]*\)\s*(?:const\s*)?\{\s*$/.test(line.code) && !/^\s*(?:if|for|while|switch|catch)\b/.test(line.code));
+        const completion = /^[\s{}();]+$/.test(line.code);
+        missing.push({ key: `b${blockIndex}_l${index + 1}`, block: blockIndex, line: index + 1, focus: setup ? 'algorithm_plan' : goal ? 'problem_goal' : completion ? 'logical_phase' : 'step_purpose' });
+      }
+    }));
+    if (!missing.length) return text;
+    const descriptions = new Map();
+    try {
+      // The second request can return descriptions only. Source remains local
+      // and immutable; no formatting difference can discard a valid solution.
+      const result = await this.client.responses.create({
+        model: request.model || this.model,
+        store: false,
+        reasoning: { effort: this.getReasoningEffort(request.model || this.model) },
+        instructions: `For every requested source line, write a short phrase the user can SAY aloud just before typing that line, as if explaining their solution to another person. At most 12 words per phrase. Explain WHY this step helps solve this particular problem, not HOW the programming language works.
+Do not narrate syntax or scaffolding at all. Do not mention classes, methods, functions, namespaces, public/private access, types, imports, libraries, declarations, braces, semicolons, indentation, or making names available. Naming the data structure or algorithm is useful; naming grammar is not.
+For setup or structural lines, briefly recap the relevant algorithmic plan or logical phase instead of naming the language construct. For example, setup for Two Sum can be "I'll find each number's missing partner with fast lookups." A closing structural line can be "That completes checking the current candidate." Do not say "I organize a class" or "I expose a method".
+Each requested line includes a focus. For algorithm_plan, say why the chosen approach works (for example, avoiding all pair comparisons with fast lookups); ignore what that setup line literally says. For problem_goal, state what the algorithm needs to find or produce. For logical_phase, briefly say which search step is complete. Only step_purpose should describe the operation performed by that specific source line. Never say "standard names", "solution container", "entry point", "accessible", or "routine" as a substitute for explaining the algorithm.
+Also provide algorithm_plan: three short spoken phrases describing the high-level algorithm only, and problem_goal: one short phrase stating the required result. These fields must describe the problem and strategy, with no discussion of code organization or programming language. The app uses these high-level phrases above setup lines rather than narrating their syntax.
+Examples of spoken purpose: "I remember earlier numbers so I can find the complement quickly."; "I check whether this number completes a pair we've already started."; "I return the two positions once the target sum is found."; "That finishes checking this candidate."; "I prepare the fast lookup approach for this search."
+Do not repeat the same generic explanation for every line. Use the surrounding code to make each phrase useful. Do not rewrite any code. Return only the requested JSON descriptions with the given block and line numbers.`,
+        input: [{ role: 'user', content: [{ type: 'input_text', text: JSON.stringify({
+          problemContext: original.text,
+          codeBlocks: original.codeBlocks.map(block => ({ language: block.language, source: block.cleanCode })),
+          requestedLines: missing
+        }) }] }],
+        text: { format: {
+          type: 'json_schema', name: 'line_descriptions', strict: true,
+          schema: { type: 'object', properties: {
+            algorithm_plan: { type: 'array', items: { type: 'string' } },
+            problem_goal: { type: 'string' },
+            descriptions: { type: 'object', properties: Object.fromEntries(missing.map(item => [item.key, { type: 'string' }])),
+              required: missing.map(item => item.key), additionalProperties: false }
+          }, required: ['algorithm_plan', 'problem_goal', 'descriptions'], additionalProperties: false }
+        } },
+        max_output_tokens: Math.min(16384, Math.max(1024, missing.length * 70))
+      });
+      const parsed = JSON.parse(result.output_text || '{}');
+      const allowed = new Set(missing.map(item => `${item.block}:${item.line}`));
+      const rows = Array.isArray(parsed.descriptions) ? parsed.descriptions : Object.entries(parsed.descriptions || {}).map(([key, description]) => {
+        const match = key.match(/^b(\d+)_l(\d+)$/);
+        return { block: match ? Number(match[1]) : -1, line: match ? Number(match[2]) : -1, description };
+      });
+      for (const item of rows) {
+        const key = `${item.block}:${item.line}`;
+        if (allowed.has(key) && typeof item.description === 'string' && item.description.trim()) {
+          descriptions.set(key, item.description.replace(/[\r\n]+/g, ' ').trim());
         }
       }
+      const plans = Array.isArray(parsed.algorithm_plan) ? parsed.algorithm_plan.filter(value => typeof value === 'string' && value.trim()) : [];
+      let planIndex = 0;
+      for (const item of missing) {
+        const highLevel = item.focus === 'algorithm_plan' && plans.length ? plans[planIndex++ % plans.length]
+          : item.focus === 'problem_goal' && typeof parsed.problem_goal === 'string' ? parsed.problem_goal : null;
+        if (highLevel?.trim()) descriptions.set(`${item.block}:${item.line}`, highLevel.replace(/[\r\n]+/g, ' ').trim());
+      }
+      if (descriptions.size !== missing.length) logger.warn('Some code line descriptions are unavailable', { expected: missing.length, received: descriptions.size });
+    } catch (error) {
+      logger.warn('Line descriptions unavailable; retaining the original solution', { error: error.message });
     }
-
-    const finalErrorInfo = this.analyzeError(lastError);
-    const finalError = new Error(`Gemini API failed after trying ${modelsToTry.join(', ')}: ${lastError?.message}`);
-    finalError.errorAnalysis = finalErrorInfo;
-    finalError.originalError = lastError;
-    throw finalError;
+    let output = '';
+    let cursor = 0;
+    original.codeBlocks.forEach((block, blockIndex) => {
+      const prefix = block.language.toLowerCase() === 'python' ? '# @explain: ' : '// @explain: ';
+      const source = block.lines.map((line, index) => {
+        const description = descriptions.get(`${blockIndex}:${index + 1}`) || line.explanation;
+        return description ? prefix + description + '\n' + line.code : line.code;
+      }).join('\n') + (block.cleanCode.endsWith('\n') ? '\n' : '');
+      const start = block.fullMatch.indexOf('\n') + 1;
+      const index = text.indexOf(block.fullMatch, cursor);
+      if (index < 0) return;
+      output += text.slice(cursor, index) + block.fullMatch.slice(0, start) + source + block.fullMatch.slice(start + block.code.length);
+      cursor = index + block.fullMatch.length;
+    });
+    return output + text.slice(cursor);
   }
 
   /**
@@ -980,7 +986,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
    */
   async processTranscriptionWithIntelligentResponseStream(text, activeSkill, sessionMemory = [], programmingLanguage = null, onDelta = null) {
     if (!this.isInitialized) {
-      throw new Error('LLM service not initialized. Check Gemini API key configuration.');
+      throw new Error('LLM service not initialized. Check OpenAI API key configuration.');
     }
 
     const startTime = Date.now();
@@ -1029,7 +1035,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     }
   }
 
-  /** Safely pull the text delta out of a streamed Gemini chunk. */
+  /** Safely pull the text delta out of a streamed OpenAI chunk. */
   _extractChunkText(chunk) {
     try {
       const t = chunk && chunk.text;
@@ -1049,143 +1055,28 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
   }
 
   /**
-   * Run a streaming Gemini request with the same model-fallback + retry policy
+   * Run a streaming OpenAI request with the same model-fallback + retry policy
    * as executeRequest. Accumulates and returns the full text; invokes onDelta
    * for each chunk.
    */
-  async executeStreamingRequest(geminiRequest, onDelta) {
-    const maxRetries = config.get('llm.gemini.maxRetries');
-    const apiKey = config.getApiKey('GEMINI');
-    const primaryModel = this.model;
-    const fallbackModels = config.get('llm.gemini.fallbackModels') || [];
-    const modelsToTry = [primaryModel, ...fallbackModels];
-
-    let lastError = null;
-
-    for (const modelName of modelsToTry) {
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          const fullText = await this._streamRequestForModel(geminiRequest, modelName, apiKey, onDelta);
-
-          if (!fullText) {
-            throw new Error('Empty streamed response from Gemini API');
-          }
-
-          logger.debug('Gemini streaming request successful', {
-            attempt,
-            model: modelName,
-            responseLength: fullText.length
-          });
-
-          return fullText;
-        } catch (error) {
-          const errorInfo = this.analyzeError(error);
-          lastError = error;
-
-          logger.warn(`Gemini streaming attempt ${attempt} failed for model ${modelName}`, {
-            error: error.message,
-            errorType: errorInfo.type,
-            remainingAttempts: maxRetries - attempt,
-            model: modelName
-          });
-
-          const isModelUnavailable = errorInfo.type === 'RATE_LIMIT_ERROR' ||
-            error.message.includes('503') ||
-            error.message.includes('UNAVAILABLE') ||
-            error.message.includes('high demand');
-
-          if (isModelUnavailable && modelName !== modelsToTry[modelsToTry.length - 1]) {
-            break; // try next fallback model
-          }
-
-          if (attempt === maxRetries) {
-            break;
-          }
-
-          const baseDelay = errorInfo.isNetworkError ? 2500 : 1500;
-          const delay = baseDelay * attempt + Math.random() * 1000;
-          await this.delay(delay);
-        }
+  async executeStreamingRequest(request, onDelta) {
+    const stream = await this.client.responses.create({ ...this.buildOpenAIRequest(request), stream: true });
+    let text = '';
+    let completed = false;
+    for await (const event of stream) {
+      if (event.type === 'response.output_text.delta') {
+        text += event.delta;
+        if (typeof onDelta === 'function') onDelta(event.delta);
+      } else if (event.type === 'error' || event.type === 'response.failed') {
+        throw new Error(event.message || event.response?.error?.message || 'OpenAI stream failed');
+      } else if (event.type === 'response.incomplete') {
+        throw new Error('OpenAI response incomplete: ' + (event.response?.incomplete_details?.reason || 'unknown'));
+      } else if (event.type === 'response.completed') {
+        completed = true;
       }
     }
-
-    throw lastError || new Error('Gemini streaming request failed');
-  }
-
-  _streamRequestForModel(geminiRequest, modelName, apiKey, onDelta) {
-    const https = require('https');
-    const timeout = config.get('llm.gemini.timeout');
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse`;
-    const postData = JSON.stringify(geminiRequest);
-    const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
-
-    const options = {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-        'Content-Length': Buffer.byteLength(postData),
-        'User-Agent': this.getUserAgent()
-      },
-      timeout,
-      agent
-    };
-
-    return new Promise((resolve, reject) => {
-      const req = https.request(url, options, (res) => {
-        if (res.statusCode !== 200) {
-          let errBody = '';
-          res.on('data', (c) => { errBody += c; });
-          res.on('end', () => reject(new Error(`HTTP ${res.statusCode}: ${errBody}`)));
-          return;
-        }
-
-        let fullText = '';
-        let buffer = '';
-
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => {
-          buffer += chunk;
-          let idx;
-          while ((idx = buffer.indexOf('\n')) !== -1) {
-            const line = buffer.slice(0, idx).trim();
-            buffer = buffer.slice(idx + 1);
-            if (!line.startsWith('data:')) {
-              continue;
-            }
-            const payload = line.slice(5).trim();
-            if (!payload || payload === '[DONE]') {
-              continue;
-            }
-            try {
-              const json = JSON.parse(payload);
-              const piece = this._extractChunkText(json);
-              if (piece) {
-                fullText += piece;
-                if (typeof onDelta === 'function') {
-                  onDelta(piece);
-                }
-              }
-            } catch (_) {
-              // Partial JSON across chunk boundaries is rare with line framing;
-              // skip anything that doesn't parse cleanly.
-            }
-          }
-        });
-
-        res.on('end', () => resolve(fullText.trim()));
-        res.on('error', (error) => reject(new Error(`Streaming response error: ${error.message}`)));
-      });
-
-      req.on('error', (error) => reject(new Error(`Streaming request failed: ${error.message}`)));
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error('Streaming request timeout'));
-      });
-
-      req.write(postData);
-      req.end();
-    });
+    if (!completed || !text) throw new Error('OpenAI stream ended without a complete answer');
+    return this.ensureCodeAnnotations(text, request);
   }
 
   async performPreflightCheck() {
@@ -1193,9 +1084,9 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     try {
       const startTime = Date.now();
       await this.testNetworkConnection({ 
-        host: 'generativelanguage.googleapis.com', 
+        host: 'api.openai.com',
         port: 443, 
-        name: 'Gemini API Endpoint' 
+        name: 'OpenAI API Endpoint'
       });
       const latency = Date.now() - startTime;
       
@@ -1244,7 +1135,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
       return {
         type: 'AUTH_ERROR',
         isNetworkError: false,
-        suggestedAction: 'Verify Gemini API key configuration'
+        suggestedAction: 'Verify OpenAI API key configuration'
       };
     }
     
@@ -1277,8 +1168,8 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
 
   async checkNetworkConnectivity() {
     const connectivityTests = [
-      { host: 'google.com', port: 443, name: 'Google (HTTPS)' },
-      { host: 'generativelanguage.googleapis.com', port: 443, name: 'Gemini API Endpoint' }
+
+      { host: 'api.openai.com', port: 443, name: 'OpenAI API Endpoint' }
     ];
 
     const results = await Promise.allSettled(
@@ -1330,7 +1221,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
       'dsa': 'This appears to be a data structures and algorithms problem. Consider breaking it down into smaller components and identifying the appropriate algorithm or data structure to use.',
       'system-design': 'For this system design question, consider scalability, reliability, and the trade-offs between different architectural approaches.',
       'programming': 'This looks like a programming challenge. Focus on understanding the requirements, edge cases, and optimal time/space complexity.',
-      'default': 'I can help analyze this content. Please ensure your Gemini API key is properly configured for detailed analysis.'
+      'default': 'I can help analyze this content. Please ensure your OpenAI API key is properly configured for detailed analysis.'
     };
 
     const response = fallbackResponses[activeSkill] || fallbackResponses.default;
@@ -1390,93 +1281,14 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
   }
 
   async testConnection() {
-    if (!this.isInitialized) {
-      return { success: false, error: 'Service not initialized' };
-    }
-
+    if (!this.isInitialized) return { success: false, error: 'Add your OpenAI API key in Settings.' };
+    const start = Date.now();
     try {
-      // First check network connectivity
-      const networkCheck = await this.checkNetworkConnectivity();
-      const hasNetworkIssues = networkCheck.tests.some(test => !test.success);
-      
-      if (hasNetworkIssues) {
-        logger.warn('Network connectivity issues detected', networkCheck);
-      }
-
-      const generationConfig = this.getGenerationConfig({ temperature: 0, maxOutputTokens: 64 });
-      const fallbackModels = config.get('llm.gemini.fallbackModels') || [];
-      const modelsToTry = [this.model, ...fallbackModels];
-
-      let lastError = null;
-      let result = null;
-      let usedModel = null;
-
-      for (const modelName of modelsToTry) {
-        try {
-          const startTime = Date.now();
-          result = await this.client.models.generateContent({
-            model: modelName,
-            contents: 'Test connection. Please respond with "OK".',
-            config: generationConfig
-          });
-          usedModel = modelName;
-          const latency = Date.now() - startTime;
-          const { text } = this.extractTextFromCandidates(result);
-
-          logger.info('Connection test successful', {
-            response: text,
-            latency,
-            model: usedModel,
-            networkCheck: hasNetworkIssues ? 'issues_detected' : 'healthy'
-          });
-
-          return {
-            success: true,
-            response: text,
-            latency,
-            model: usedModel,
-            networkConnectivity: networkCheck
-          };
-        } catch (error) {
-          lastError = error;
-          logger.warn(`Connection test failed for model ${modelName}`, {
-            error: error.message,
-            model: modelName
-          });
-
-          const isModelUnavailable = error.message.includes('503') ||
-            error.message.includes('UNAVAILABLE') ||
-            error.message.includes('high demand') ||
-            error.message.includes('quota') ||
-            error.message.includes('rate limit');
-
-          if (!isModelUnavailable && modelName === this.model) {
-            // Primary model failed for a non-availability reason; don't hide it
-            break;
-          }
-        }
-      }
-
-      throw lastError || new Error('Connection test failed on all models');
+      const response = await this.executeRequest({ contents: 'Reply with OK.' });
+      return { success: true, response, latency: Date.now() - start, model: this.model };
     } catch (error) {
       const errorAnalysis = this.analyzeError(error);
-      logger.error('Connection test failed', {
-        error: error.message,
-        errorAnalysis
-      });
-
-      // Map raw SDK errors to user-friendly messages. The wizard only
-      // surfaces `error`, so any raw SDK error string would land in the
-      // UI verbatim.
-      const friendlyError = this._friendlyTestError(error, errorAnalysis);
-
-      return {
-        success: false,
-        error: friendlyError,
-        errorType: errorAnalysis?.type || 'UNKNOWN',
-        errorAnalysis,
-        networkConnectivity: await this.checkNetworkConnectivity().catch(() => null)
-      };
+      return { success: false, error: this._friendlyTestError(error, errorAnalysis), errorAnalysis };
     }
   }
 
@@ -1488,29 +1300,29 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     const raw = (error?.message || '').toLowerCase();
 
     if (type === 'NETWORK_ERROR' || raw.includes('fetch failed') || raw.includes('enotfound')) {
-      return 'Cannot reach Google servers. Check your internet connection, firewall, or VPN settings.';
+      return 'Cannot reach OpenAI servers. Check your internet connection, firewall, or VPN settings.';
     }
     if (type === 'AUTH_ERROR' || raw.includes('api key') || raw.includes('401') || raw.includes('403')) {
-      return 'Invalid API key or insufficient permissions. Double-check the key at aistudio.google.com/apikey.';
+      return 'Invalid API key or insufficient permissions. Double-check the key at platform.openai.com/api-keys.';
     }
     if (type === 'RATE_LIMIT_ERROR' || raw.includes('429') || raw.includes('quota')) {
-      return 'Rate limit or quota exceeded. Wait a moment or check your Google Cloud billing.';
+      return 'Rate limit or quota exceeded. Wait a moment or check your OpenAI API billing.';
     }
     if (type === 'TIMEOUT_ERROR') {
-      return 'Request timed out. The Google API may be slow or unreachable right now.';
+      return 'Request timed out. The OpenAI API may be slow or unreachable right now.';
     }
     if (type === 'MODEL_ERROR' || raw.includes('model') || raw.includes('404')) {
-      return 'The configured Gemini model is unavailable. Try a different model in Settings.';
+      return 'The configured OpenAI model is unavailable. Try a different model in Settings.';
     }
     if (raw.includes('503') || raw.includes('unavailable') || raw.includes('high demand')) {
-      return 'Gemini is experiencing high demand. Please wait a moment and try again.';
+      return 'OpenAI is experiencing high demand. Please wait a moment and try again.';
     }
     // Fall back to a stripped-down raw message (no SDK prefix noise)
     return (error?.message || 'Connection failed').replace(/^\[(GoogleGenerativeAI|GoogleGenAI) Error\]:\s*/i, '');
   }
 
   updateApiKey(newApiKey) {
-    process.env.GEMINI_API_KEY = newApiKey;
+    process.env.OPENAI_API_KEY = newApiKey;
     this.isInitialized = false;
     this.initializeClient();
     
@@ -1523,7 +1335,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
       requestCount: this.requestCount,
       errorCount: this.errorCount,
       successRate: this.requestCount > 0 ? ((this.requestCount - this.errorCount) / this.requestCount) * 100 : 0,
-      config: config.get('llm.gemini')
+      model: this.model, config: config.get('llm.openai')
     };
   }
 
@@ -1531,125 +1343,9 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  async executeAlternativeRequest(geminiRequest) {
-    const https = require('https');
-    const apiKey = config.getApiKey('GEMINI');
-    const primaryModel = config.get('llm.gemini.model');
-    const fallbackModels = config.get('llm.gemini.fallbackModels') || [];
-    const modelsToTry = [primaryModel, ...fallbackModels];
-
-    logger.info('Using alternative HTTPS request method', { modelsToTry });
-
-    let lastError = null;
-
-    for (const modelName of modelsToTry) {
-      try {
-        const result = await this._executeAlternativeRequestForModel(geminiRequest, modelName, apiKey);
-        return result;
-      } catch (error) {
-        lastError = error;
-        logger.warn(`Alternative HTTPS request failed for model ${modelName}`, {
-          error: error.message,
-          model: modelName
-        });
-
-        const isModelUnavailable = error.message.includes('503') ||
-          error.message.includes('UNAVAILABLE') ||
-          error.message.includes('high demand');
-
-        if (!isModelUnavailable && modelName === primaryModel) {
-          break;
-        }
-      }
-    }
-
-    throw lastError || new Error('Alternative HTTPS request failed for all models');
-  }
-
-  async _executeAlternativeRequestForModel(geminiRequest, modelName, apiKey) {
-    const https = require('https');
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
-
-    const postData = JSON.stringify(geminiRequest);
-
-    const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
-
-    const options = {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-        'Content-Length': Buffer.byteLength(postData),
-        'User-Agent': this.getUserAgent()
-      },
-      timeout: config.get('llm.gemini.timeout'),
-      agent
-    };
-
-    return new Promise((resolve, reject) => {
-      const req = https.request(url, options, (res) => {
-        let data = '';
-        
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-        
-        res.on('end', () => {
-          try {
-            if (res.statusCode !== 200) {
-              reject(new Error(`HTTP ${res.statusCode}: ${data}`));
-              return;
-            }
-            
-            const response = JSON.parse(data);
-            
-            logger.debug('Alternative request response structure', {
-              hasResponse: !!response,
-              hasCandidates: !!response.candidates,
-              candidatesLength: response.candidates?.length,
-              responseKeys: Object.keys(response || {}),
-              firstCandidateKeys: response.candidates?.[0] ? Object.keys(response.candidates[0]) : []
-            });
-
-            const { text, finishReason } = this.extractTextFromCandidates(response);
-
-            if (finishReason === 'MAX_TOKENS') {
-              logger.warn('Gemini alternative response reached max tokens limit', {
-                finishReason
-              });
-            }
-            
-            logger.info('Alternative request successful', {
-              responseLength: text.length,
-              statusCode: res.statusCode,
-              finishReason
-            });
-            
-            resolve(text.trim());
-          } catch (parseError) {
-            logger.error('Failed to parse alternative response', {
-              error: parseError.message,
-              rawResponse: data.substring(0, 500),
-              statusCode: res.statusCode
-            });
-            reject(new Error(`Failed to parse response: ${parseError.message}`));
-          }
-        });
-      });
-      
-      req.on('error', (error) => {
-        reject(new Error(`Alternative request failed: ${error.message}`));
-      });
-      
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error('Alternative request timeout'));
-      });
-      
-      req.write(postData);
-      req.end();
-    });
+  // Keep the existing call sites compatible with the OpenAI transport.
+  async executeAlternativeRequest(request) {
+    return this.executeRequest(request);
   }
 }
 

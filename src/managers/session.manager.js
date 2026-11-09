@@ -5,6 +5,7 @@ const { promptLoader } = require('../../prompt-loader');
 class SessionManager {
   constructor() {
     this.sessionMemory = [];
+    this.qaTurns = [];
     this.compressionEnabled = true;
     this.maxSize = config.get('session.maxMemorySize');
     this.compressionThreshold = config.get('session.compressionThreshold');
@@ -191,6 +192,19 @@ class SessionManager {
   /**
    * Get conversation history for LLM context
    */
+  addQATurn(question, answer) {
+    if (!question?.trim() || !answer?.trim()) return;
+    this.qaTurns.push({ question: question.trim(), answer: answer.trim() });
+    this.qaTurns = this.qaTurns.slice(-3);
+  }
+
+  getQAHistory() {
+    return this.qaTurns.flatMap(turn => [
+      { role: 'user', content: turn.question },
+      { role: 'model', content: turn.answer }
+    ]);
+  }
+
   getConversationHistory(maxEntries = 20) {
     // Get recent conversation events (excluding system initialization)
     const conversationEvents = this.sessionMemory
@@ -579,6 +593,7 @@ class SessionManager {
   clear() {
     const eventCount = this.sessionMemory.length;
     this.sessionMemory = [];
+    this.qaTurns = [];
     this.isInitialized = false;
     
     logger.info('Session memory cleared', { eventCount });

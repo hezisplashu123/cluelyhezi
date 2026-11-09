@@ -8,7 +8,7 @@ const logger = {
 
 class MainWindowUI {
     constructor() {
-        this.isInteractive = false;
+        this.isInteractive = true;
         this.isHidden = false;
         this.currentSkill = 'dsa'; // Default, will be updated from settings
         this.statusDot = null;
@@ -17,11 +17,14 @@ class MainWindowUI {
         this.isRecording = false;
         this.speechAvailable = false; // track availability
         this._popoverHideTimeout = null;
-        // Renderer-side audio capture state (used for Whisper on Windows)
+        // Renderer-side audio capture state (Windows captures playback only).
         this._audioContext = null;
         this._mediaStream = null;
         this._scriptNode = null;
         this._captureInterval = null;
+        this._captureGeneration = 0;
+        this._captureRetryTimer = null;
+        this._audioHealthTimer = null;
         
         // Define available skills for navigation
         this.availableSkills = [
@@ -95,7 +98,7 @@ class MainWindowUI {
             if (window.electronAPI && window.electronAPI.getWindowStats) {
                 const stats = await window.electronAPI.getWindowStats();
                 if (stats && typeof stats.isInteractive === 'boolean') {
-                    this.isInteractive = stats.isInteractive;
+                    this.isInteractive = true; // The toolbar remains usable when answer panels pass clicks through.
                     logger.debug('Loaded current interaction state', {
                         component: 'MainWindowUI',
                         interactive: this.isInteractive
@@ -104,7 +107,7 @@ class MainWindowUI {
             }
         } catch (error) {
             // If we can't get the state, assume non-interactive (safer default)
-            this.isInteractive = false;
+            this.isInteractive = true;
             logger.warn('Failed to load current interaction state, defaulting to non-interactive', {
                 component: 'MainWindowUI',
                 error: error.message
@@ -283,7 +286,7 @@ class MainWindowUI {
 
         // Screenshot click handler
         this.screenshotButton.addEventListener('click', () => {
-            if (this.isInteractive && window.electronAPI && window.electronAPI.takeScreenshot) {
+            if (window.electronAPI && window.electronAPI.takeScreenshot) {
                 window.electronAPI.takeScreenshot();
             }
         });
@@ -338,8 +341,8 @@ class MainWindowUI {
         // Language dropdown
         this.languageSelect = document.getElementById('codingLanguage');
         if (this.languageSelect) {
-            // Set default to C++ if no value is set
-            this.languageSelect.value = 'cpp';
+            // Set default to Java if no value is set
+            this.languageSelect.value = 'java';
             
             // Initialize with current setting
             if (window.electronAPI && window.electronAPI.getSettings) {
@@ -347,9 +350,9 @@ class MainWindowUI {
                     if (settings && settings.codingLanguage) {
                         this.languageSelect.value = settings.codingLanguage;
                     } else {
-                        // Save C++ as default if no language is set
-                        this.languageSelect.value = 'cpp';
-                        window.electronAPI.saveSettings({ codingLanguage: 'cpp' });
+                        // Save Java as default if no language is set
+                        this.languageSelect.value = 'java';
+                        window.electronAPI.saveSettings({ codingLanguage: 'java' });
                     }
                 }).catch(() => {
                     // Fallback to C++ on error
@@ -419,6 +422,21 @@ class MainWindowUI {
 
     setupEventListeners() {
         if (window.electronAPI) {
+            const updateScreenshotCount = (data) => {
+                const label = document.getElementById('screenshotCount');
+                if (label) label.textContent = `\\ ${data.count}`;
+            };
+            window.electronAPI.onScreenshotQueueChanged((_event, data) => updateScreenshotCount(data));
+            window.electronAPI.onScreenshotStatus((_event, data) => {
+                const label = document.getElementById('screenshotCount');
+                if (label) { label.title = data.text; label.style.color = data.error ? '#ff8a80' : '#b6ffc1'; }
+                if (this.screenshotButton) this.screenshotButton.title = data.text;
+            });
+            window.electronAPI.getScreenshotQueue().then(updateScreenshotCount);
+            document.getElementById('submitScreenshots')?.addEventListener('click', () => {
+                window.electronAPI.submitScreenshots();
+            });
+            document.getElementById('answerWindowsButton')?.addEventListener('click', () => window.electronAPI.showAnswerWindows());
             // Fix interaction mode change listener
             window.electronAPI.onInteractionModeChanged((event, interactive) => {
                 logger.debug('Interaction mode changed received:', interactive);
@@ -466,18 +484,7 @@ class MainWindowUI {
                 this.loadSpeechAvailability();
             });
             
-            // Global keyboard shortcuts
-            document.addEventListener('keydown', (e) => {
-                if (e.altKey && e.key === 'r' && this.isInteractive) {
-                    e.preventDefault();
-                    if (!this.speechAvailable) return; // guard when unavailable
-                    if (this.isRecording) {
-                        window.electronAPI.stopSpeechRecognition();
-                    } else {
-                        window.electronAPI.startSpeechRecognition();
-                    }
-                }
-            });
+            // Alt+R is handled once by the main-process global shortcut.
         }
         
         // Also listen via the api interface for backup
@@ -587,7 +594,7 @@ class MainWindowUI {
         });
         
         // Update the internal state
-        this.isInteractive = interactive;
+        this.isInteractive = true;
         
         // Update all UI elements to reflect the new state
         this.updateAllElementStates();
@@ -642,16 +649,14 @@ class MainWindowUI {
     }
 
     handleRecordingStarted() {
+        if (this.isRecording) return;
         this.isRecording = true;
         if (this.micButton) {
             this.micButton.classList.add('recording');
+            this.micButton.title = 'Listening to computer audio - click to pause (Alt+R)';
         }
-        // On Windows and macOS, Whisper audio is captured here in the renderer
-        // (Web Audio API) rather than the main process: Windows lacks sox/rec/
-        // arecord, and macOS avoids an unbundled Homebrew `sox`. Must match the
-        // main process's useRendererCapture gate (speech.service.js). Linux uses
-        // the native recorder. navigator.userAgentData is preferred when present
-        // since navigator.platform is deprecated.
+        // Windows captures playback for both providers; macOS retains its
+        // existing renderer capture. Linux uses the native recorder.
         const platform = (typeof navigator !== 'undefined' &&
           ((navigator.userAgentData && navigator.userAgentData.platform) ||
             navigator.platform || '')).toLowerCase();
@@ -666,21 +671,29 @@ class MainWindowUI {
         this.isRecording = false;
         if (this.micButton) {
             this.micButton.classList.remove('recording');
+            this.micButton.title = 'Computer audio paused - click to resume (Alt+R)';
         }
         this._stopRendererAudioCapture();
         logger.debug('Recording stopped', { component: 'MainWindowUI' });
     }
 
     /**
-     * Capture microphone audio in the renderer using the Web Audio API.
-     * This is used for Whisper on Windows where node-record-lpcm16's sox/rec
-     * dependencies are unavailable.
+     * Capture Windows playback without opening a microphone. Other platforms
+     * retain their existing input capture behavior.
      */
     async _startRendererAudioCapture() {
+        this._stopRendererAudioCapture();
+        const generation = this._captureGeneration;
         try {
-            this._stopRendererAudioCapture();
-
-            const stream = await navigator.mediaDevices.getUserMedia({
+            const platform = ((navigator.userAgentData && navigator.userAgentData.platform) ||
+                navigator.platform || '').toLowerCase();
+            const systemAudio = platform.includes('win');
+            const stream = systemAudio
+                ? await navigator.mediaDevices.getDisplayMedia({
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+                    video: true
+                })
+                : await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
@@ -688,23 +701,48 @@ class MainWindowUI {
                     sampleRate: { ideal: 16000 }
                 }
             });
+            if (generation !== this._captureGeneration || !this.isRecording) {
+                stream.getTracks().forEach(track => track.stop());
+                return;
+            }
             this._mediaStream = stream;
+            // Only audio enters the processing graph; never retain screen video.
+            stream.getVideoTracks().forEach(track => track.stop());
+            if (!stream.getAudioTracks().length) {
+                throw new Error('Computer audio capture returned no audio track.');
+            }
+            stream.getAudioTracks().forEach(track => {
+                track.onended = () => {
+                    if (this.isRecording && generation === this._captureGeneration) {
+                        this._retryRendererAudioCapture('Playback audio stream ended');
+                    }
+                };
+            });
 
             const audioContext = new (window.AudioContext || window.webkitAudioContext)({
                 sampleRate: 16000
             });
             this._audioContext = audioContext;
+            await audioContext.resume();
+            if (generation !== this._captureGeneration || !this.isRecording) {
+                return;
+            }
+            if (audioContext.sampleRate !== 16000) {
+                throw new Error('Speech capture requires a 16000 Hz audio context.');
+            }
 
-            const source = audioContext.createMediaStreamSource(stream);
-            const bufferSize = 4096;
+            const source = audioContext.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
+            const bufferSize = 1024;
             const scriptNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
             this._scriptNode = scriptNode;
+            this._lastAudioChunkAt = Date.now();
 
             scriptNode.onaudioprocess = (event) => {
                 if (!this.isRecording || !window.electronAPI || !window.electronAPI.sendAudioChunk) {
                     return;
                 }
                 const inputData = event.inputBuffer.getChannelData(0);
+                this._lastAudioChunkAt = Date.now();
                 const pcm16 = new Int16Array(inputData.length);
                 for (let i = 0; i < inputData.length; i++) {
                     const s = Math.max(-1, Math.min(1, inputData[i]));
@@ -714,22 +752,49 @@ class MainWindowUI {
             };
 
             source.connect(scriptNode);
-            scriptNode.connect(audioContext.destination);
+            // Keep processing active without replaying captured audio into the
+            // speakers, which would feed it back into system loopback.
+            const silentGain = audioContext.createGain();
+            silentGain.gain.value = 0;
+            scriptNode.connect(silentGain);
+            silentGain.connect(audioContext.destination);
+            this._audioHealthTimer = setInterval(() => {
+                if (!this.isRecording || generation !== this._captureGeneration) return;
+                if (Date.now() - this._lastAudioChunkAt > 6000) {
+                    this._retryRendererAudioCapture('Playback audio stream stalled');
+                }
+            }, 2000);
 
-            logger.info('Renderer audio capture started', { component: 'MainWindowUI' });
+            logger.info(systemAudio ? 'Computer audio capture started (microphone excluded)' : 'Input audio capture started', { component: 'MainWindowUI' });
         } catch (error) {
+            if (generation !== this._captureGeneration) return;
             logger.error('Failed to start renderer audio capture', {
                 component: 'MainWindowUI',
                 error: error.message
             });
-            // Notify main process so it can stop the recording state
-            try {
-                await window.electronAPI.stopSpeechRecognition();
-            } catch (_) { /* ignore */ }
+            this._retryRendererAudioCapture(error.message);
         }
     }
 
+    _retryRendererAudioCapture(reason) {
+        this._stopRendererAudioCapture();
+        if (!this.isRecording) return;
+        if (window.electronAPI.reportAudioCaptureError) {
+            window.electronAPI.reportAudioCaptureError(reason);
+        }
+        // Keep the speech session and its buffered audio; reopen only capture.
+        this._captureRetryTimer = setTimeout(() => {
+            this._captureRetryTimer = null;
+            if (this.isRecording) this._startRendererAudioCapture();
+        }, 2000);
+    }
+
     _stopRendererAudioCapture() {
+        this._captureGeneration++;
+        clearTimeout(this._captureRetryTimer);
+        this._captureRetryTimer = null;
+        clearInterval(this._audioHealthTimer);
+        this._audioHealthTimer = null;
         try {
             if (this._scriptNode) {
                 this._scriptNode.disconnect();
@@ -1014,7 +1079,7 @@ class MainWindowUI {
                 component: 'MainWindowUI',
                 error: error.message
             });
-            this.showNotification('Failed to load Gemini configuration', 'error');
+            this.showNotification('Failed to load OpenAI configuration', 'error');
         }
     }
 
@@ -1024,7 +1089,7 @@ class MainWindowUI {
         modal.innerHTML = `
             <div class="bg-gray-900 text-white p-6 rounded-lg max-w-md w-full">
                 <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-xl font-bold">🤖 Gemini Flash 1.5 Configuration</h2>
+                    <h2 class="text-xl font-bold">🤖 OpenAI Configuration</h2>
                     <button class="text-gray-400 hover:text-white" onclick="this.closest('.fixed').remove()">✕</button>
                 </div>
                 
@@ -1035,10 +1100,10 @@ class MainWindowUI {
                 
                 <div class="mb-4">
                     <label class="block text-sm font-medium mb-2">API Key:</label>
-                    <input type="password" id="geminiApiKey" placeholder="Enter your Gemini API key" 
+                    <input type="password" id="geminiApiKey" placeholder="Enter your OpenAI API key"
                            class="w-full p-2 bg-gray-800 border border-gray-600 rounded text-white">
                     <p class="text-xs text-gray-400 mt-1">
-                        Get your API key from: <a href="https://aistudio.google.com/app/apikey" target="_blank" class="text-blue-400">Google AI Studio</a>
+                        Get your API key from: <a href="https://platform.openai.com/api-keys" target="_blank" class="text-blue-400">OpenAI Platform</a>
                     </p>
                 </div>
                 
@@ -1071,20 +1136,20 @@ class MainWindowUI {
         try {
             const result = await window.electronAPI.setGeminiApiKey(apiKey);
             if (result.success) {
-                this.showNotification('Gemini API key configured successfully!', 'success');
+                this.showNotification('OpenAI API key configured successfully!', 'success');
                 document.querySelector('.fixed').remove();
                 
-                logger.info('Gemini API key configured', { component: 'MainWindowUI' });
+                logger.info('OpenAI API key configured', { component: 'MainWindowUI' });
             } else {
                 this.showNotification(`Configuration failed: ${result.error}`, 'error');
-                logger.error('Gemini configuration failed', {
+                logger.error('OpenAI configuration failed', {
                     component: 'MainWindowUI',
                     error: result.error
                 });
             }
         } catch (error) {
             this.showNotification(`Error: ${error.message}`, 'error');
-            logger.error('Gemini configuration error', {
+            logger.error('OpenAI configuration error', {
                 component: 'MainWindowUI',
                 error: error.message
             });
@@ -1095,18 +1160,18 @@ class MainWindowUI {
         try {
             const result = await window.electronAPI.testGeminiConnection();
             if (result.success) {
-                this.showNotification('Gemini connection test successful!', 'success');
-                logger.info('Gemini connection test successful', { component: 'MainWindowUI' });
+                this.showNotification('OpenAI connection test successful!', 'success');
+                logger.info('OpenAI connection test successful', { component: 'MainWindowUI' });
             } else {
                 this.showNotification(`Connection test failed: ${result.error}`, 'error');
-                logger.error('Gemini connection test failed', {
+                logger.error('OpenAI connection test failed', {
                     component: 'MainWindowUI',
                     error: result.error
                 });
             }
         } catch (error) {
             this.showNotification(`Error: ${error.message}`, 'error');
-            logger.error('Gemini connection test error', {
+            logger.error('OpenAI connection test error', {
                 component: 'MainWindowUI',
                 error: error.message
             });

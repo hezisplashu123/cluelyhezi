@@ -5,11 +5,18 @@ const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('electronAPI', {
   // Screenshot and OCR
   takeScreenshot: () => ipcRenderer.invoke('take-screenshot'),
+  submitScreenshots: () => ipcRenderer.invoke('submit-screenshots'),
+  showAnswerWindows: () => ipcRenderer.invoke('show-answer-windows'),
+  getScreenshotQueue: () => ipcRenderer.invoke('get-screenshot-queue'),
+  onScreenshotQueueChanged: (callback) => ipcRenderer.on('screenshot-queue-changed', callback),
+  onScreenshotStatus: (callback) => ipcRenderer.on('screenshot-status', callback),
+  onPanelScroll: (callback) => ipcRenderer.on('panel-scroll', callback),
   
   // Speech recognition
   startSpeechRecognition: () => ipcRenderer.invoke('start-speech-recognition'),
   stopSpeechRecognition: () => ipcRenderer.invoke('stop-speech-recognition'),
   sendAudioChunk: (buffer) => ipcRenderer.send('audio-chunk', { buffer }),
+  reportAudioCaptureError: (message) => ipcRenderer.send('audio-capture-error', message),
   getSpeechAvailability: () => ipcRenderer.invoke('get-speech-availability'),
   
   // Window management
@@ -41,6 +48,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hideSettings: () => ipcRenderer.invoke('hide-settings'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+  saveResumeContext: (text) => ipcRenderer.invoke('save-resume-context', text),
 
   // First-run onboarding
   getFirstRunStatus: () => ipcRenderer.invoke('get-first-run-status'),

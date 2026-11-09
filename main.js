@@ -1,6 +1,8 @@
 const path = require("path");
 const fs = require("fs");
-const { app, BrowserWindow, globalShortcut, session, ipcMain } = require("electron");
+const { app, BrowserWindow, globalShortcut, session, ipcMain, screen } = require("electron");
+const { configureSystemAudioCapture, allowAudioCapturePermission } = require('./src/core/system-audio');
+const { resumeContext, MAX_RESUME_BYTES } = require('./src/core/resume-context');
 
 // ── Resolve a stable .env location ──
 // In packaged builds process.cwd() is unstable and frequently read-only
@@ -102,6 +104,8 @@ process.on("unhandledRejection", (reason) => {
 const captureService = require("./src/services/capture.service");
 const speechService = require("./src/services/speech.service");
 const llmService = require("./src/services/llm.service");
+const windowsInput = require('./src/services/windows-input.service');
+const vmControls = require('./src/services/vm-control.service');
 
 // Managers
 const windowManager = require("./src/managers/window.manager");
@@ -112,8 +116,13 @@ class ApplicationController {
     this.isReady = false;
     this.starting = false;
     this.activeSkill = "dsa";
-  // Default to C++ so language is enforced from first run
-  this.codingLanguage = "cpp";
+    const ScreenshotQueue = require('./src/services/screenshot-queue');
+    this.screenshots = new ScreenshotQueue(
+      options => captureService.captureAndProcess(options),
+      count => windowManager.broadcastToAllWindows('screenshot-queue-changed', { count })
+    );
+  // Default to Java so language is enforced from first run
+  this.codingLanguage = "java";
     this.speechAvailable = false;
 
     // Utterance coalescing: VAD emits a transcript per natural pause, but a
@@ -123,7 +132,8 @@ class ApplicationController {
     this._utteranceBuffer = "";
     this._utteranceTimer = null;
     this._utteranceDispatchInFlight = false;
-    this._utteranceCoalesceMs = 800;
+    this._utteranceCoalesceMs = 1500;
+    this._voiceQuestionQueue = [];
 
     // First-run onboarding: detects missing .env / API key and triggers
     // a settings-window prompt on first launch so users don't have to
@@ -260,12 +270,25 @@ class ApplicationController {
 
       await windowManager.initializeWindows({ showMainWindow: !isFirstRun });
       this.setupGlobalShortcuts();
+      windowsInput.start(windowManager, {
+        capture: () => this.queueScreenshot(),
+        submit: () => this.triggerScreenshotOCR(),
+        interact: () => windowManager.toggleInteraction(),
+        panels: () => windowManager.showAnswerWindows()
+      });
+      await vmControls.start(windowManager, {
+        capture: () => this.queueScreenshot(),
+        submit: () => this.triggerScreenshotOCR(),
+        interact: () => windowManager.toggleInteraction(),
+        panels: () => windowManager.showAnswerWindows()
+      });
 
       // Initialize default stealth mode with terminal icon
       this.updateAppIcon("terminal");
 
       this.starting = false;
       this.isReady = true;
+      if (!this.isFirstRun) windowManager.showAnswerWindows();
 
       // Launch the onboarding wizard if this is the first run.
       if (this.isFirstRun) {
@@ -332,10 +355,12 @@ class ApplicationController {
   }
 
   setupPermissions() {
+    configureSystemAudioCapture(session.defaultSession);
     session.defaultSession.setPermissionRequestHandler(
       (webContents, permission, callback) => {
         const allowedPermissions = ["microphone", "camera", "display-capture"];
-        const granted = allowedPermissions.includes(permission);
+        const granted = allowedPermissions.includes(permission) ||
+          allowAudioCapturePermission(webContents.getURL(), permission);
 
         logger.debug("Permission request", { permission, granted });
         callback(granted);
@@ -345,7 +370,11 @@ class ApplicationController {
 
   setupGlobalShortcuts() {
     const shortcuts = {
-      "CommandOrControl+Shift+S": () => this.triggerScreenshotOCR(),
+      "\\": () => this.queueScreenshot(),
+      "`": () => this.triggerScreenshotOCR(),
+      "CommandOrControl+Shift+S": () => this.queueScreenshot(),
+      "CommandOrControl+Shift+Enter": () => this.triggerScreenshotOCR(),
+      "CommandOrControl+Shift+O": () => windowManager.showAnswerWindows(),
       "CommandOrControl+Shift+V": () => windowManager.toggleVisibility(),
       "CommandOrControl+Shift+I": () => windowManager.toggleInteraction(),
       "CommandOrControl+Shift+C": () => windowManager.switchToWindow("chat"),
@@ -367,7 +396,8 @@ class ApplicationController {
 
     Object.entries(shortcuts).forEach(([accelerator, handler]) => {
       const success = globalShortcut.register(accelerator, handler);
-      logger.debug("Global shortcut registered", { accelerator, success });
+      if (!success) logger.warn('Global shortcut unavailable', { accelerator });
+      else logger.debug("Global shortcut registered", { accelerator, success });
     });
   }
 
@@ -384,11 +414,12 @@ class ApplicationController {
       });
     });
 
-    speechService.on("transcription", (text) => {
-      this.handleTranscriptionFragment(text);
+    speechService.on("transcription", (text, metadata) => {
+      this.handleTranscriptionFragment(text, metadata);
     });
 
     speechService.on("interim-transcription", (text) => {
+      if (text?.trim()) windowManager.showLiveQuestion();
       BrowserWindow.getAllWindows().forEach((window) => {
         window.webContents.send("interim-transcription", { text });
       });
@@ -415,15 +446,18 @@ class ApplicationController {
   }
 
   setupIPCHandlers() {
-  ipcMain.handle("take-screenshot", () => this.triggerScreenshotOCR());
+  ipcMain.handle("take-screenshot", () => this.queueScreenshot());
+  ipcMain.handle("submit-screenshots", () => this.triggerScreenshotOCR());
+  ipcMain.handle("show-answer-windows", () => { windowManager.showAnswerWindows(); return { success: true }; });
+  ipcMain.handle("get-screenshot-queue", () => ({ count: this.screenshots.images.length }));
   ipcMain.handle("list-displays", () => captureService.listDisplays());
   ipcMain.handle("capture-area", (event, options) => captureService.captureAndProcess(options));
     
     // Provide reliable clipboard write via main process
-    ipcMain.handle("copy-to-clipboard", (event, text) => {
+    ipcMain.handle("copy-to-clipboard", async (event, text) => {
       try {
         const { clipboard } = require("electron");
-        clipboard.writeText(String(text ?? ""));
+        await clipboard.writeText(String(text ?? ""));
         return true;
       } catch (e) {
         logger.error("Failed to write to clipboard", { error: e.message });
@@ -445,7 +479,11 @@ class ApplicationController {
       return speechService.getStatus();
     });
 
-    // Raw PCM audio captured by the renderer's Web Audio API (Windows Whisper path)
+    // Raw PCM audio captured by the renderer (Windows system playback).
+    ipcMain.on('audio-capture-error', (_event, message) => {
+      logger.warn('Computer audio capture interrupted; retrying', { reason: String(message).slice(0, 300) });
+      speechService.emit('error', `Computer audio capture failed: ${String(message).slice(0, 300)}`);
+    });
     ipcMain.on("audio-chunk", (_event, data) => {
       if (data && data.buffer) {
         speechService.handleAudioChunkFromRenderer(Buffer.from(data.buffer));
@@ -482,6 +520,12 @@ class ApplicationController {
           win.webContents.send("speech-availability", { available: this.speechAvailable });
         }
       });
+      // Start only once the main renderer has installed its audio listeners.
+      // Capture remains on when the overlay is hidden or another app has focus.
+      if (process.platform === 'win32' && this.speechAvailable && !speechService.isRecording) {
+        logger.info('Starting continuous computer audio listening');
+        speechService.startRecording();
+      }
     });
 
     ipcMain.on("test-chat-window", () => {
@@ -633,8 +677,10 @@ class ApplicationController {
       return windowManager.getWindowBindingStatus();
     });
 
-    ipcMain.handle("get-window-stats", () => {
-      return windowManager.getWindowStats();
+    ipcMain.handle("get-window-stats", (event) => {
+      const stats = windowManager.getWindowStats();
+      if (event.sender === windowManager.getWindow('main')?.webContents) stats.isInteractive = true;
+      return stats;
     });
 
     ipcMain.handle("set-window-gap", (event, gap) => {
@@ -688,6 +734,26 @@ class ApplicationController {
 
     ipcMain.handle("get-settings", () => {
       return this.getSettings();
+    });
+
+    ipcMain.handle("save-resume-context", async (_event, value) => {
+      try {
+        const text = String(value || '').trim();
+        if (Buffer.byteLength(text, 'utf8') > MAX_RESUME_BYTES) {
+          return { success: false, error: `Resume text must be ${Math.round(MAX_RESUME_BYTES / 1024)} KB or smaller.` };
+        }
+
+        const resumePath = path.join(app.getPath("userData"), "resume-context.txt");
+        const tmpPath = resumePath + ".tmp";
+        fs.writeFileSync(tmpPath, text, "utf8");
+        fs.renameSync(tmpPath, resumePath);
+        this.persistEnvUpdates({ RESUME_CONTEXT_PATH: text ? resumePath : '' });
+        resumeContext.clearCache();
+        return { success: true, status: resumeContext.getStatus() };
+      } catch (error) {
+        logger.error("Failed to save resume context", { error: error.message });
+        return { success: false, error: error.message };
+      }
     });
 
     // First-run onboarding status — renderer can query to know whether
@@ -1025,7 +1091,35 @@ class ApplicationController {
     windowManager.broadcastToAllWindows("skill-updated", { skill: newSkill });
   }
 
+  async queueScreenshot() {
+    if (!this.isReady) return { success: false, error: 'Application is not ready.' };
+    try {
+      windowManager.broadcastToAllWindows('screenshot-status', { text: 'Capturing screenshot…' });
+      // Resolve now so rapid captures retain the monitor chosen at key press.
+      const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+      const count = await this.screenshots.add({ displayId: display.id });
+      windowManager.broadcastToAllWindows('screenshot-status', { text: `${count} screenshot(s) saved. Press backtick to send.`, count });
+      return { success: true, count };
+    } catch (error) {
+      windowManager.broadcastToAllWindows('screenshot-status', { text: error.message, error: true });
+      this.broadcastOCRError(error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
   async triggerScreenshotOCR() {
+    if (!this.isReady) return { success: false, error: 'Application is not ready.' };
+    try {
+      return await this.screenshots.submit(batch => this.analyzeScreenshots(batch));
+    } catch (error) {
+      windowManager.broadcastToAllWindows('screenshot-status', { text: error.message, error: true });
+      windowManager.showLLMResponse(`Screenshot request failed: ${error.message}\n\nAny queued screenshots have been kept. Press backtick to retry.`);
+      this.broadcastOCRError(error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async analyzeScreenshots(captures) {
     if (!this.isReady) {
       logger.warn("Screenshot requested before application ready");
       return;
@@ -1035,14 +1129,7 @@ class ApplicationController {
 
     try {
       windowManager.showLLMLoading();
-
-  const capture = await captureService.captureAndProcess();
-
-      if (!capture.imageBuffer || !capture.imageBuffer.length) {
-        windowManager.hideLLMResponse();
-        this.broadcastOCRError("Failed to capture screenshot image");
-        return;
-      }
+      windowManager.broadcastToAllWindows('screenshot-status', { text: `Sending ${captures.length} screenshot(s) to ${llmService.imageModel}…` });
 
       // Use image directly with LLM and active skill; do not send chat messages here
       const sessionHistory = sessionManager.getOptimizedHistory();
@@ -1058,8 +1145,8 @@ class ApplicationController {
       });
 
       const llmResult = await llmService.processImageWithSkillStream(
-        capture.imageBuffer,
-        capture.mimeType || 'image/png',
+        captures,
+        'image/png',
         this.activeSkill,
         sessionHistory.recent,
         needsProgrammingLanguage ? this.codingLanguage : null,
@@ -1071,6 +1158,7 @@ class ApplicationController {
         }
       );
       llmResult.metadata = { ...llmResult.metadata, messageId };
+      windowManager.broadcastToAllWindows('screenshot-status', { text: `Answered using ${captures.length} screenshot(s) · ${llmService.imageModel}` });
 
       sessionManager.addModelResponse(llmResult.response, {
         skill: this.activeSkill,
@@ -1104,6 +1192,7 @@ class ApplicationController {
           error: error.message
         }
       });
+      throw error;
     }
   }
 
@@ -1120,6 +1209,7 @@ class ApplicationController {
       const messageId = `chat-${Date.now()}-${this._responseSeq}`;
       windowManager.broadcastToAllWindows("transcription-llm-response-start", {
         messageId,
+        question: text,
         skill: this.activeSkill
       });
       windowManager.showLLMLoading();
@@ -1146,6 +1236,8 @@ class ApplicationController {
         responsePreview: llmResult.response.substring(0, 200) + "...",
       });
 
+      sessionManager.addQATurn(text, llmResult.response);
+
       // Add LLM response to session memory
       sessionManager.addModelResponse(llmResult.response, {
         skill: this.activeSkill,
@@ -1156,6 +1248,8 @@ class ApplicationController {
       this.broadcastTranscriptionLLMResponse(llmResult);
 
       windowManager.showLLMResponse(llmResult.response, {
+        question: text,
+        messageId,
         skill: this.activeSkill,
         processingTime: llmResult.metadata.processingTime,
         usedFallback: llmResult.metadata.usedFallback,
@@ -1187,7 +1281,7 @@ class ApplicationController {
    * asked once the speaker has actually paused — this is what stops one spoken
    * line from producing two separate, slow answers.
    */
-  handleTranscriptionFragment(text) {
+  handleTranscriptionFragment(text, metadata = {}) {
     const fragment = (text || "").trim();
     if (!fragment) {
       return;
@@ -1198,6 +1292,13 @@ class ApplicationController {
     BrowserWindow.getAllWindows().forEach((window) => {
       window.webContents.send("transcription-received", { text: fragment });
     });
+
+    if (metadata.committed) {
+      // Live transcription already waited for 1.5 seconds of actual silence.
+      this._voiceQuestionQueue.push(fragment);
+      this.dispatchCoalescedUtterance();
+      return;
+    }
 
     this._utteranceBuffer = this._utteranceBuffer
       ? `${this._utteranceBuffer} ${fragment}`
@@ -1221,11 +1322,13 @@ class ApplicationController {
     if (this._utteranceDispatchInFlight) {
       return;
     }
-    const combined = this._utteranceBuffer.trim();
+    if (!this._voiceQuestionQueue.length && this._utteranceTimer) return;
+    const queued = this._voiceQuestionQueue.shift();
+    const combined = queued || this._utteranceBuffer.trim();
     if (!combined) {
       return;
     }
-    this._utteranceBuffer = "";
+    if (!queued) this._utteranceBuffer = "";
     this._utteranceDispatchInFlight = true;
 
     try {
@@ -1239,7 +1342,7 @@ class ApplicationController {
     } finally {
       this._utteranceDispatchInFlight = false;
       // Anything that arrived while we were busy gets answered now.
-      if (this._utteranceBuffer.trim()) {
+      if (this._voiceQuestionQueue.length || (this._utteranceBuffer.trim() && !this._utteranceTimer)) {
         this.dispatchCoalescedUtterance();
       }
     }
@@ -1285,6 +1388,7 @@ class ApplicationController {
       messageId = `tr-${Date.now()}-${this._responseSeq}`;
       windowManager.broadcastToAllWindows("transcription-llm-response-start", {
         messageId,
+        question: cleanText,
         skill: this.activeSkill
       });
       // Surface the overlay immediately so streamed tokens are visible there
@@ -1305,6 +1409,8 @@ class ApplicationController {
       );
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
+      sessionManager.addQATurn(cleanText, llmResult.response);
+
       // Add LLM response to session memory
       sessionManager.addModelResponse(llmResult.response, {
         skill: this.activeSkill,
@@ -1320,6 +1426,8 @@ class ApplicationController {
       // appears in both the chat panel and the floating overlay, mirroring
       // the behaviour of screenshot/image responses.
       windowManager.showLLMResponse(llmResult.response, {
+        question: cleanText,
+        messageId,
         skill: this.activeSkill,
         processingTime: llmResult.metadata.processingTime,
         usedFallback: llmResult.metadata.usedFallback,
@@ -1473,6 +1581,8 @@ class ApplicationController {
   }
 
   onWillQuit() {
+    vmControls.stop();
+    windowsInput.stop();
     globalShortcut.unregisterAll();
     windowManager.destroyAllWindows();
 
@@ -1502,7 +1612,7 @@ class ApplicationController {
     // using. Empty strings are returned rather than skipped so the UI can
     // distinguish "unset" from "stale value from a previous load".
     return {
-      codingLanguage: this.codingLanguage || "cpp",
+      codingLanguage: this.codingLanguage || "java",
       activeSkill: this.activeSkill || "dsa",
       appIcon: this.appIcon || "terminal",
       selectedIcon: this.appIcon || "terminal",
@@ -1515,7 +1625,9 @@ class ApplicationController {
       whisperModel: process.env.WHISPER_MODEL || "turbo",
       whisperLanguage: process.env.WHISPER_LANGUAGE || "en",
       whisperSegmentMs: process.env.WHISPER_SEGMENT_MS || "4000",
-      geminiKey: process.env.GEMINI_API_KEY || "",
+      geminiKey: process.env.OPENAI_API_KEY || "",
+      resumeText: resumeContext.load().text || "",
+      resumeStatus: resumeContext.getStatus(),
 
       azureConfigured: !!process.env.AZURE_SPEECH_KEY && !!process.env.AZURE_SPEECH_REGION,
       speechAvailable: this.speechAvailable
@@ -1554,7 +1666,7 @@ class ApplicationController {
       // Writing to .env ensures they survive app restarts and are picked
       // up the next time the app boots.
       const envUpdates = {};
-      if (settings.speechProvider === "azure" || settings.speechProvider === "whisper") {
+      if (["azure", "whisper", "openai"].includes(settings.speechProvider)) {
         envUpdates.SPEECH_PROVIDER = settings.speechProvider;
       }
       if (settings.azureKey !== undefined) {
@@ -1576,7 +1688,10 @@ class ApplicationController {
         envUpdates.WHISPER_SEGMENT_MS = String(settings.whisperSegmentMs);
       }
       if (settings.geminiKey !== undefined) {
-        envUpdates.GEMINI_API_KEY = settings.geminiKey;
+        envUpdates.OPENAI_API_KEY = settings.geminiKey;
+      }
+      if (settings.resumePath !== undefined) {
+        envUpdates.RESUME_CONTEXT_PATH = settings.resumePath;
       }
 
       // Capture the previous whisper command BEFORE persisting — persistEnvUpdates
@@ -1587,12 +1702,16 @@ class ApplicationController {
 
       const persistedKeys = this.persistEnvUpdates(envUpdates);
 
+      if (settings.resumePath !== undefined) {
+        resumeContext.clearCache();
+      }
+
       // If the Gemini key was just saved, reinitialize the LLM service
       // so the new client picks up the key. Without this, the test-
       // connection button in the onboarding wizard fails with
       // "Service not initialized" because the client was first created
       // at app startup, before any key was set.
-      if (settings.geminiKey !== undefined && envUpdates.GEMINI_API_KEY !== undefined) {
+      if (settings.geminiKey !== undefined && envUpdates.OPENAI_API_KEY !== undefined) {
         try {
           llmService.initializeClient();
           logger.info("LLM service reinitialized after Gemini key update");

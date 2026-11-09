@@ -8,7 +8,7 @@ const os = require('os');
  * Responsibilities:
  *   - Decide whether this is the user's first launch of OpenCluely
  *   - Auto-create a default `.env` from `env.example` if one is missing
- *   - Report whether a Gemini API key is configured (the only required key)
+ *   - Report whether a OpenAI API key is configured (the only required key)
  *   - Persist a "first-run completed" sentinel so we don't nag on every launch
  *
  * The settings UI is the source of truth for API-key entry. This module
@@ -25,14 +25,14 @@ class FirstRunManager {
 
   /**
    * Returns true if this looks like a fresh install — no .env, no
-   * sentinel file, or .env exists but has no Gemini key.
+   * sentinel file, or .env exists but has no OpenAI key.
    */
   needsOnboarding() {
     if (!fs.existsSync(this.sentinelPath)) return true;
     if (!fs.existsSync(this.envPath)) return true;
     const content = this._readEnv();
-    const gemini = (content.GEMINI_API_KEY || '').trim();
-    return !gemini || gemini === 'your_gemini_api_key_here';
+    const gemini = (content.OPENAI_API_KEY || '').trim();
+    return !gemini || gemini === 'your_openai_api_key_here';
   }
 
   /**
@@ -79,11 +79,11 @@ class FirstRunManager {
    */
   getStatus() {
     const env = this._readEnv();
-    const gemini = (env.GEMINI_API_KEY || '').trim();
+    const gemini = (env.OPENAI_API_KEY || '').trim();
     return {
       envExists: fs.existsSync(this.envPath),
       sentinelExists: fs.existsSync(this.sentinelPath),
-      geminiConfigured: !!gemini && gemini !== 'your_gemini_api_key_here',
+      geminiConfigured: !!gemini && gemini !== 'your_openai_api_key_here',
       azureConfigured: !!(env.AZURE_SPEECH_KEY || '').trim() && !!(env.AZURE_SPEECH_REGION || '').trim(),
       whisperConfigured: !!(env.WHISPER_COMMAND || '').trim(),
       needsOnboarding: this.needsOnboarding()
@@ -139,10 +139,10 @@ class FirstRunManager {
     }
     return [
       '# OpenCluely configuration',
-      '# Add your Google Gemini API key below — the app picks it up immediately.',
-      '# Get a key from: https://aistudio.google.com/',
+      '# Add your OpenAI API key below — the app picks it up immediately.',
+      '# Get a key from: https://platform.openai.com/api-keys',
       '',
-      'GEMINI_API_KEY=your_gemini_api_key_here',
+      'OPENAI_API_KEY=your_openai_api_key_here',
       '',
       '# Speech provider: "whisper" (local) or "azure" (cloud).',
       '# WHISPER_COMMAND is auto-set to the project-local venv when you',

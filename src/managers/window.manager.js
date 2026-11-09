@@ -7,7 +7,7 @@ class WindowManager {
   constructor() {
     this.windows = new Map();
     this.activeWindow = 'main';
-    this.isInteractive = true; // default to interactive so windows are clickable/drag-able
+    this.isInteractive = false; // Panels pass clicks through; toolbar stays usable.
     this.isVisible = false;
     this.currentDisplay = null;
     this.screenWatcher = null;
@@ -38,7 +38,7 @@ class WindowManager {
     
     this.windowConfigs = {
       main: {
-        width: 520,
+        width: 620,
         height: 35,
         useContentSize: true,
         file: 'index.html',
@@ -51,10 +51,18 @@ class WindowManager {
         title: 'Chat'
       },
       llmResponse: {
-        width: 840,
+        width: 620,
         height: 480,
         file: 'llm-response.html',
         title: 'AI Response',
+        alwaysOnTop: true
+      },
+      codeResponse: {
+        width: 600,
+        height: 520,
+        file: 'llm-response.html',
+        query: { panel: 'code' },
+        title: 'Code',
         alwaysOnTop: true
       },
       settings: {
@@ -116,6 +124,8 @@ class WindowManager {
       await this.createMainWindow({ autoShow: showMainWindow });
       await this.createChatWindow();
       await this.createLLMResponseWindow();
+      const codeWindow = await this.createWindow('codeResponse');
+      this.windows.set('codeResponse', codeWindow);
       await this.createSettingsWindow();
       
       this.setupWindowEventHandlers();
@@ -123,7 +133,7 @@ class WindowManager {
       this.setupScreenCaptureAvailabilityWatcher();
 
       // Make windows interactive by default so they are not click-through
-      this.setInteractive(true);
+      this.setInteractive(false);
       
       // Optionally show the main window (deferred during onboarding)
       if (showMainWindow) {
@@ -367,7 +377,7 @@ class WindowManager {
         }),
         level: process.platform === 'darwin' ? 'floating' : undefined,
       };
-    } else if (type === 'llmResponse') {
+    } else if (type === 'llmResponse' || type === 'codeResponse') {
       // LLM Response window - completely frameless, just content
       browserWindowOptions = {
         ...baseOptions,
@@ -376,6 +386,8 @@ class WindowManager {
         transparent: true,
         backgroundColor: '#00000000',
         resizable: true,
+        minWidth: 320,
+        minHeight: 200,
         minimizable: false,
         maximizable: false,
         closable: false,
@@ -437,7 +449,7 @@ class WindowManager {
         ...browserWindowOptions,
         parent: null,
         modal: false,
-        thickFrame: false,
+        thickFrame: type === 'llmResponse' || type === 'codeResponse',
       };
     }
 
@@ -464,7 +476,7 @@ class WindowManager {
     });
 
   // Load the HTML file
-    await window.loadFile(windowConfig.file);
+    await window.loadFile(path.join(__dirname, '../..', windowConfig.file), { query: windowConfig.query || {} });
     
   // Position the window
     this.positionWindow(window, type);
@@ -473,7 +485,7 @@ class WindowManager {
     this.applyStealthMeasures(window, type);
     
   // Initialize interaction mode based on current state for ALL windows
-    if (this.isInteractive) {
+    if (this.isInteractive || !['llmResponse', 'codeResponse'].includes(type)) {
       window.setIgnoreMouseEvents(false);
     } else {
       window.setIgnoreMouseEvents(true, { forward: true });
@@ -694,6 +706,14 @@ class WindowManager {
   }
 
   positionWindow(window, type) {
+    if (type === 'codeResponse') {
+      const display = this.currentDisplay || screen.getPrimaryDisplay();
+      const { x, y, width, height } = display.workArea;
+      const [windowWidth, windowHeight] = window.getSize();
+      window.setSize(Math.min(windowWidth, width - 40), Math.min(windowHeight, height - 100));
+      window.setPosition(Math.round(x + width - Math.min(windowWidth, width - 40) - 20), y + 80);
+      return;
+    }
     const display = this.currentDisplay || screen.getPrimaryDisplay();
     const { x: displayX, y: displayY, width: screenWidth, height: screenHeight } = display.workArea || display.workAreaSize;
     
@@ -749,8 +769,8 @@ class WindowManager {
     const xPosition = displayX + Math.round((screenWidth - maxWidth) / 2);
     
     // Ensure windows don't go outside screen bounds horizontally
-    const adjustedMainX = Math.max(displayX, Math.min(displayX + screenWidth - mainWidth, xPosition));
-    const adjustedLlmX = Math.max(displayX, Math.min(displayX + screenWidth - llmWidth, xPosition));
+    const adjustedMainX = Math.round(displayX + (screenWidth - mainWidth) / 2);
+    const adjustedLlmX = Math.round(displayX + (screenWidth - llmWidth) / 2);
     
     // Position main window (top)
     const mainX = adjustedMainX;
@@ -824,6 +844,13 @@ class WindowManager {
   }
 
   showOnCurrentDesktop(win) {
+    if ([this.windows.get('llmResponse'), this.windows.get('codeResponse')].includes(win) && !this.isInteractive) {
+      win.setFocusable(false);
+      win.setIgnoreMouseEvents(true, { forward: true });
+      win.setAlwaysOnTop(true);
+      win.showInactive();
+      return;
+    }
     if (!win || win.isDestroyed()) return;
 
     const llmWin = this.windows.get('llmResponse');
@@ -924,6 +951,10 @@ class WindowManager {
   }
 
   setupScreenCaptureAvailabilityWatcher() {
+    // Windows audio uses process loopback and does not need screen probing.
+    // Repeated window thumbnails can fail on protected/minimized windows and
+    // flood the terminal with WGC errors. Screenshots still work on demand.
+    if (process.platform === 'win32') return;
     // Avoid screencast portal errors on Linux/Wayland by disabling periodic detection
     if (process.platform === 'linux') {
       logger.info('Skipping screen capture availability watcher on Linux to avoid portal screencast errors');
@@ -1059,10 +1090,11 @@ class WindowManager {
     }
 
     this.windows.forEach((window, type) => {
-      if (type !== 'llmResponse') { // Don't show LLM response unless it has content
+      if (type !== 'llmResponse' && type !== 'codeResponse') {
         this.showOnCurrentDesktop(window);
       }
     });
+    if (this.lastResponse) this.showAnswerWindows();
     
     this.isVisible = true;
     const activeWindow = this.windows.get(this.activeWindow);
@@ -1078,9 +1110,7 @@ class WindowManager {
 
   hideAllWindows() {
     this.windows.forEach((window, type) => {
-      if (type !== 'llmResponse') {
-        window.hide();
-      }
+      window.hide();
     });
     
     this.isVisible = false;
@@ -1106,14 +1136,16 @@ class WindowManager {
     
     this.windows.forEach((window, type) => {
       if (!window.isDestroyed()) {
-        if (interactive) {
+        const isPanel = type === 'llmResponse' || type === 'codeResponse';
+        if (isPanel) window.setFocusable(interactive);
+        if (interactive || !isPanel) {
           // Interactive mode: allow mouse events for all windows
           window.setIgnoreMouseEvents(false);
         } else {
           // Non-interactive mode: enable click-through with forwarding for all windows
           window.setIgnoreMouseEvents(true, { forward: true });
         }
-        window.webContents.send('interaction-mode-changed', interactive);
+        window.webContents.send('interaction-mode-changed', isPanel ? interactive : true);
       }
     });
     
@@ -1257,6 +1289,17 @@ class WindowManager {
   }
 
   showLLMResponse(content, metadata = {}) {
+    this.lastResponse = { content, metadata };
+    // Only screenshot submissions may replace the separate code popup.
+    const isCoding = metadata.isImageAnalysis === true && require('../../lib/response-parts').splitResponse(content).isCoding;
+    if (!isCoding) this.lastTextResponse = { content, metadata };
+    this.qaHistory ||= [];
+    if (!isCoding) {
+      const entry = { question: metadata.question || '', answer: content, messageId: metadata.messageId };
+      const previous = entry.messageId ? this.qaHistory.findIndex(item => item.messageId === entry.messageId) : -1;
+      if (previous >= 0) this.qaHistory[previous] = entry;
+      else this.qaHistory.push(entry);
+    }
     logger.debug('showLLMResponse called', {
       isScreenBeingShared: this.isScreenBeingShared,
       contentLength: content.length,
@@ -1282,10 +1325,21 @@ class WindowManager {
 
     logger.debug('Sending display-llm-response event to window');
     llmWindow.webContents.send('display-llm-response', {
-      content,
+      content: isCoding ? this.lastTextResponse?.content || 'Non-coding questions and answers appear here.' : content,
       metadata,
+      qaHistory: this.qaHistory,
       timestamp: new Date().toISOString()
     });
+
+    const codeWindow = this.windows.get('codeResponse');
+    if (codeWindow && !codeWindow.isDestroyed()) {
+      if (isCoding) {
+        codeWindow.webContents.send('display-llm-response', { content, metadata });
+        codeWindow.setIgnoreMouseEvents(!this.isInteractive, { forward: true });
+        this.showOnCurrentDesktop(codeWindow);
+      }
+    }
+    llmWindow.setIgnoreMouseEvents(!this.isInteractive, { forward: true });
     
     logger.debug('Showing and focusing LLM window');
     this.showOnCurrentDesktop(llmWindow);
@@ -1303,7 +1357,16 @@ class WindowManager {
     });
   }
 
+  showLiveQuestion() {
+    if (this.isScreenBeingShared) return;
+    const window = this.windows.get('llmResponse');
+    if (!window || window.isDestroyed()) return;
+    window.setIgnoreMouseEvents(!this.isInteractive, { forward: true });
+    this.showOnCurrentDesktop(window);
+  }
+
   showLLMLoading() {
+    this.windows.get('codeResponse')?.hide();
     if (this.isScreenBeingShared) {
       logger.warn('LLM loading blocked due to screen sharing mode');
       return;
@@ -1327,9 +1390,18 @@ class WindowManager {
   }
 
   hideLLMResponse() {
+    this.windows.get('codeResponse')?.hide();
     const llmWindow = this.windows.get('llmResponse');
     if (llmWindow) {
       llmWindow.hide();
+    }
+  }
+
+  showAnswerWindows() {
+    this.positionBoundWindows();
+    for (const type of ['main', 'llmResponse', 'codeResponse']) {
+      const window = this.windows.get(type);
+      if (window && !window.isDestroyed()) this.showOnCurrentDesktop(window);
     }
   }
 
@@ -1623,6 +1695,8 @@ class WindowManager {
     
     this.windows.forEach((window, type) => {
       if (window && !window.isDestroyed()) {
+        // Code is independently placed by the user; cursor changes must not move it.
+        if (type === 'codeResponse') return;
         // Skip main and llmResponse if they're bound (already handled above)
         if (this.bindWindows && (type === 'main' || type === 'llmResponse')) {
           return;

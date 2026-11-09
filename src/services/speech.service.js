@@ -351,9 +351,11 @@ if (typeof window === 'undefined') {
   global.navigator = global.window.navigator;
   global.AudioContext = global.window.AudioContext;
   global.webkitAudioContext = global.window.webkitAudioContext;
-  global.URL = global.window.URL;
-  global.Blob = global.window.Blob;
-  global.File = global.window.File;
+  // Keep Node's real web primitives. The speech browser shims do not
+  // implement URL.searchParams and break every OpenAI request if installed globally.
+  global.URL = global.URL || require('node:url').URL;
+  global.Blob = global.Blob || global.window.Blob;
+  global.File = global.File || global.window.File;
 
   if (!global.performance) {
     global.performance = {
@@ -439,6 +441,12 @@ class SpeechService extends EventEmitter {
     const provider = this._getConfiguredProvider();
     this.provider = provider;
 
+    if (provider === 'openai') {
+      this.available = !!process.env.OPENAI_API_KEY;
+      this.emit('status', this.available ? 'Live transcription ready' : 'OpenAI API key required for live transcription');
+      return;
+    }
+
     if (provider === 'azure') {
       this._initializeAzureClient();
       return;
@@ -460,7 +468,7 @@ class SpeechService extends EventEmitter {
         throw new Error('Azure Speech SDK dependency is not installed');
       }
 
-      if (!recorder || typeof recorder.record !== 'function') {
+      if (process.platform !== 'win32' && (!recorder || typeof recorder.record !== 'function')) {
         throw new Error('Local microphone recorder dependency is not installed');
       }
 
@@ -480,8 +488,8 @@ class SpeechService extends EventEmitter {
       this.speechConfig.speechRecognitionLanguage = azureConfig.language || 'en-US';
       this.speechConfig.outputFormat = sdk.OutputFormat.Detailed;
       this.speechConfig.setProperty(sdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, '5000');
-      this.speechConfig.setProperty(sdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, '2000');
-      this.speechConfig.setProperty(sdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, '2000');
+      this.speechConfig.setProperty(sdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, '700');
+      this.speechConfig.setProperty(sdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, '700');
 
       if (azureConfig.enableDictation) {
         this.speechConfig.enableDictation();
@@ -551,6 +559,11 @@ class SpeechService extends EventEmitter {
       this.sessionStartTime = Date.now();
       this.retryCount = 0;
 
+      if (this.provider === 'openai') {
+        this._startLiveRecording();
+        return;
+      }
+
       if (this.provider === 'azure') {
         this._startAzureRecording();
         return;
@@ -569,6 +582,37 @@ class SpeechService extends EventEmitter {
     }
   }
 
+  async _startLiveRecording() {
+    const { LiveTranscription } = require('./live-transcription.service');
+    this._cleanup();
+    const live = new LiveTranscription({ apiKey: process.env.OPENAI_API_KEY });
+    this.liveTranscription = live;
+    this.isRecording = true;
+    live.on('interim', text => this.emit('interim-transcription', text));
+    live.on('transcription', (text, metadata) => this.emit('transcription', text, metadata));
+    live.on('error', error => {
+      if (this.liveTranscription !== live) return;
+      this.emit('error', error.message);
+      this.isRecording = false;
+      this._finalizeStop('Live transcription stopped');
+    });
+    try {
+      await live.connect();
+      if (this.liveTranscription !== live || !this.isRecording) return;
+      logger.info('Live transcription connected', { model: 'gpt-live-transcribe', silenceMs: 1500 });
+      this.useRendererCapture = process.platform === 'win32' || process.platform === 'darwin';
+      if (!this.useRendererCapture) this._startMicrophoneCapture();
+      this.emit('recording-started');
+      this.emit('status', 'Live transcription started');
+      if (global.windowManager) global.windowManager.handleRecordingStarted();
+    } catch (error) {
+      if (this.liveTranscription !== live) return;
+      this.emit('error', error.message);
+      this.isRecording = false;
+      this._finalizeStop('Live transcription stopped');
+    }
+  }
+
   _startAzureRecording() {
     if (!this.speechConfig) {
       throw new Error('Azure Speech client not initialized');
@@ -580,9 +624,14 @@ class SpeechService extends EventEmitter {
     this._cleanup();
 
     try {
-      this.pushStream = sdk.AudioInputStream.createPushStream();
+      this.useRendererCapture = process.platform === 'win32';
+      this.pushStream = sdk.AudioInputStream.createPushStream(
+        sdk.AudioStreamFormat.getWaveFormatPCM(16000, 16, 1)
+      );
       this.audioConfig = sdk.AudioConfig.fromStreamInput(this.pushStream);
-      this._startMicrophoneCapture();
+      if (!this.useRendererCapture) {
+        this._startMicrophoneCapture();
+      }
       this.recognizer = new sdk.SpeechRecognizer(this.speechConfig, this.audioConfig);
     } catch (error) {
       logger.error('Failed to start Azure recording session', { error: error.message });
@@ -680,15 +729,13 @@ class SpeechService extends EventEmitter {
     this.emit('recording-started');
     this.emit('status', 'Local Whisper recording started');
 
-    // Capture microphone audio in the renderer via the Web Audio API on Windows
-    // and macOS. Windows lacks the Unix sox/rec/arecord tools node-record-lpcm16
-    // needs; macOS would otherwise require a Homebrew `sox` install (not bundled)
-    // and a child-process mic that the system TCC prompt can't attribute. The
-    // renderer path uses getUserMedia, which macOS prompts for cleanly via the
-    // app's NSMicrophoneUsageDescription. Linux keeps the native recorder path.
+    // Windows captures system playback in the renderer. macOS retains its
+    // existing renderer microphone path; Linux uses the native recorder.
     this.useRendererCapture = process.platform === 'win32' || process.platform === 'darwin';
     if (this.useRendererCapture) {
-      this.emit('status', 'Waiting for microphone audio…');
+      this.emit('status', process.platform === 'win32'
+        ? 'Listening to computer audio (microphone excluded)'
+        : 'Waiting for microphone audio…');
       // The renderer starts sending chunks once it receives the recording-started event.
       this._startSegmentWatchdog();
       if (global.windowManager) {
@@ -761,17 +808,35 @@ class SpeechService extends EventEmitter {
 
   /**
    * Receive raw 16kHz mono 16-bit PCM audio from the renderer and add it to
-   * the current Whisper segment buffer.
+   * the selected speech provider.
    */
   handleAudioChunkFromRenderer(chunk) {
-    if (!this.isRecording || this.provider !== 'whisper' || !this.useRendererCapture) {
+    if (!this.isRecording || !this.useRendererCapture) {
       return;
     }
     if (!chunk || !chunk.length) {
       return;
     }
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    this._ingestWhisperAudio(buffer);
+    if (this.provider === 'openai') {
+      if (!this._audioDataLogged) {
+        this._audioDataLogged = true;
+        logger.info('Streaming computer audio for live transcription', { sampleRate: 16000, bytesPerChunk: buffer.length });
+      }
+      this.liveTranscription?.append(buffer);
+      return;
+    }
+    if (!this._audioDataLogged) {
+      this._audioDataLogged = true;
+      logger.info('Receiving continuous playback audio', {
+        provider: this.provider, sampleRate: 16000, channels: 1, bytesPerChunk: buffer.length
+      });
+    }
+    if (this.provider === 'azure' && this.pushStream) {
+      this.pushStream.write(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+    } else if (this.provider === 'whisper') {
+      this._ingestWhisperAudio(buffer);
+    }
   }
 
   /**
@@ -912,6 +977,14 @@ class SpeechService extends EventEmitter {
     }
 
     this.isRecording = false;
+    if (this.provider === 'openai') {
+      const live = this.liveTranscription;
+      this.emit('recording-stopped');
+      Promise.resolve(live?.finish()).finally(() => {
+        if (this.liveTranscription === live) this._finalizeStop('Recording stopped');
+      });
+      return;
+    }
     const sessionDuration = this.sessionStartTime ? Date.now() - this.sessionStartTime : 0;
     logger.info('Stopping speech recognition session', {
       provider: this.provider,
@@ -979,6 +1052,8 @@ class SpeechService extends EventEmitter {
   }
 
   _cleanup() {
+    this.liveTranscription?.close();
+    this.liveTranscription = null;
     if (this.segmentTimer) {
       clearInterval(this.segmentTimer);
       this.segmentTimer = null;
@@ -1071,6 +1146,14 @@ class SpeechService extends EventEmitter {
   }
 
   async testConnection() {
+    if (this.provider === 'openai') {
+      const { LiveTranscription } = require('./live-transcription.service');
+      const live = new LiveTranscription({ apiKey: process.env.OPENAI_API_KEY });
+      try {
+        await live.connect();
+        return { success: true, message: 'Live transcription connection successful' };
+      } finally { live.close(); }
+    }
     if (this.provider === 'azure') {
       if (!this.speechConfig) {
         throw new Error('Speech service not initialized');
@@ -1117,7 +1200,7 @@ class SpeechService extends EventEmitter {
     return {
       provider: this.provider,
       isRecording: this.isRecording,
-      isInitialized: this.provider === 'azure' ? !!this.speechConfig : !!this.whisperCommand,
+      isInitialized: this.provider === 'openai' ? this.available : this.provider === 'azure' ? !!this.speechConfig : !!this.whisperCommand,
       sessionDuration: this.sessionStartTime ? Date.now() - this.sessionStartTime : 0,
       retryCount: this.retryCount,
       effectiveSettings: {
@@ -1139,6 +1222,7 @@ class SpeechService extends EventEmitter {
   }
 
   isAvailable() {
+    if (this.provider === 'openai') return !!this.available && !!process.env.OPENAI_API_KEY;
     if (this.provider === 'azure') {
       return !!this.speechConfig && !!this.available;
     }
@@ -1171,7 +1255,7 @@ class SpeechService extends EventEmitter {
   _getConfiguredProvider() {
     const provider = String(this._getSetting('speechProvider') || process.env.SPEECH_PROVIDER || '').trim().toLowerCase();
 
-    if (provider === 'azure' || provider === 'whisper') {
+    if (provider === 'azure' || provider === 'whisper' || provider === 'openai') {
       return provider;
     }
 
@@ -1649,6 +1733,10 @@ class SpeechService extends EventEmitter {
       return;
     }
 
+    if (this.provider === 'openai') {
+      this.liveTranscription?.append(Buffer.from(chunk));
+      return;
+    }
     if (this.provider === 'azure' && this.pushStream) {
       try {
         this.pushStream.write(chunk);
@@ -1755,8 +1843,26 @@ class SpeechService extends EventEmitter {
     }
 
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opencluely-whisper-out-'));
+    let command = this.whisperCommand.command;
+    let baseArgs = this.whisperCommand.baseArgs;
+    // The stock Whisper CLI invokes FFmpeg even for PCM WAV. Our capture
+    // already has the exact format Whisper needs, so read samples directly.
+    if (path.extname(audioFilePath).toLowerCase() === '.wav') {
+      const helper = path.join(__dirname, '../../scripts/transcribe-whisper.py')
+        .replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`);
+      const moduleIndex = baseArgs.indexOf('-m');
+      if (moduleIndex >= 0 && baseArgs[moduleIndex + 1] === 'whisper') {
+        baseArgs = [...baseArgs.slice(0, moduleIndex), helper];
+      } else if (/^whisper(?:\.exe)?$/i.test(path.basename(command))) {
+        const python = path.join(path.dirname(command), process.platform === 'win32' ? 'python.exe' : 'python');
+        if (fs.existsSync(python)) {
+          command = python;
+          baseArgs = [helper];
+        }
+      }
+    }
     const args = [
-      ...this.whisperCommand.baseArgs,
+      ...baseArgs,
       audioFilePath,
       '--model', this._getWhisperModel(),
       '--language', this._getWhisperLanguage(),
@@ -1773,8 +1879,8 @@ class SpeechService extends EventEmitter {
 
     try {
       await new Promise((resolve, reject) => {
-        const child = spawn(this.whisperCommand.command, args, {
-          stdio: ['ignore', 'pipe', 'pipe']
+        const child = spawn(command, args, {
+          stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
         });
 
         let stderr = '';
@@ -1798,7 +1904,7 @@ class SpeechService extends EventEmitter {
 
       const transcriptPath = path.join(outputDir, `${path.parse(audioFilePath).name}.txt`);
       if (!fs.existsSync(transcriptPath)) {
-        return '';
+        throw new Error('Whisper produced no transcript file. Check its Python environment and FFmpeg installation for custom CLI commands.');
       }
 
       return fs.readFileSync(transcriptPath, 'utf8').trim();

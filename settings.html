@@ -270,6 +270,28 @@
         .settings-note code {
             color: rgba(255, 255, 255, 0.9);
         }
+
+        .resume-text {
+            max-width: none;
+            min-height: 180px;
+            resize: vertical;
+            line-height: 1.45;
+            font-family: inherit;
+        }
+
+        .resume-status {
+            margin-top: 8px;
+        }
+
+        .resume-status.error {
+            color: #ff9b9b;
+        }
+
+        .resume-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
     </style>
 </head>
 <body>
@@ -307,7 +329,7 @@
                             <option value="cpp">C++</option>
                             <option value="c">C</option>
                             <option value="python">Python</option>
-                            <option value="java">Java</option>
+                            <option value="java" selected>Java</option>
                             <option value="javascript">JavaScript</option>
                         </select>
                     </div>
@@ -358,6 +380,7 @@
                             <div class="settings-item-description">Choose Azure Speech or a local OpenAI Whisper CLI</div>
                         </div>
                         <select class="input-field" id="speechProvider">
+                            <option value="openai">OpenAI Live Transcription</option>
                             <option value="azure">Azure Speech</option>
                             <option value="whisper">Local Whisper</option>
                         </select>
@@ -427,16 +450,40 @@
             <div class="settings-section">
                 <div class="settings-section-title">
                     <i class="fas fa-robot"></i>
-                    Gemini Settings
+                    OpenAI Settings
                 </div>
                 <div class="settings-section-content">
                     <div class="settings-item">
                         <div>
-                            <div class="settings-item-label">Google API Key</div>
-                            <div class="settings-item-description">Your Google API key for Gemini models</div>
+                            <div class="settings-item-label">OpenAI API Key</div>
+                            <div class="settings-item-description">Your OpenAI API key for text and screenshot answers</div>
                         </div>
-                        <input type="password" class="input-field" id="geminiKey" placeholder="Enter your Google API key">
+                        <input type="password" class="input-field" id="geminiKey" placeholder="Enter your OpenAI API key">
                     </div>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <div class="settings-section-title">
+                    <i class="fas fa-file-alt"></i>
+                    Interview Background
+                </div>
+                <div class="settings-section-content">
+                    <div class="settings-item">
+                        <div class="settings-stack">
+                            <div>
+                                <div class="settings-item-label">Resume experience</div>
+                                <div class="settings-item-description">Paste your resume information as plain text. Answers will use it to respond confidently in your voice and infer from related experience.</div>
+                            </div>
+                            <textarea class="input-field resume-text" id="resumeText" maxlength="65536" placeholder="Paste your work experience, projects, education, skills, accomplishments, and any other background here..."></textarea>
+                            <div class="resume-actions">
+                                <button class="btn" id="saveResumeButton" type="button">Save background</button>
+                                <button class="btn" id="clearResumeButton" type="button">Clear</button>
+                            </div>
+                            <div class="settings-note resume-status" id="resumeStatus">No resume context is loaded.</div>
+                        </div>
+                    </div>
+                    <div class="settings-note">This text is saved locally on this computer. It is sent to OpenAI with each answer request, so the displayed estimate is added to input usage each time.</div>
                 </div>
             </div>
             

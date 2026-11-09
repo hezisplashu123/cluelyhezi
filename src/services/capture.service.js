@@ -66,7 +66,8 @@ class CaptureService {
 
   async captureScreenshot(options = {}) {
     const targetDisplay = this._getTargetDisplay(options.displayId);
-    const { width, height } = targetDisplay.size || { width: 1920, height: 1080 };
+    const width = Math.round(targetDisplay.size.width * targetDisplay.scaleFactor);
+    const height = Math.round(targetDisplay.size.height * targetDisplay.scaleFactor);
 
     const sources = await desktopCapturer.getSources({
       types: ['screen'],
@@ -77,16 +78,13 @@ class CaptureService {
       throw new Error('No screen sources available for capture');
     }
 
-    // Find source matching the target display by comparing sizes as heuristic
-    let source = sources[0];
-    const match = sources.find(s => {
-      const size = s.thumbnail.getSize();
-      return size.width === width && size.height === height;
-    });
-    if (match) source = match;
+    // Equal-sized monitors are common: match the actual display ID.
+    const source = sources.find(s => String(s.display_id) === String(targetDisplay.id)) ||
+      (sources.length === 1 ? sources[0] : null);
+    if (!source) throw new Error('Selected display is unavailable for capture.');
 
     const image = source.thumbnail;
-    if (!image) throw new Error('Failed to capture screen thumbnail');
+    if (!image || image.isEmpty()) throw new Error('Failed to capture screen thumbnail');
 
     logger.debug('Screenshot captured successfully', {
       sourceName: source.name,
@@ -107,8 +105,8 @@ class CaptureService {
   _getTargetDisplay(displayId) {
     const all = screen.getAllDisplays();
     if (!all || all.length === 0) return screen.getPrimaryDisplay();
-    if (displayId == null) return screen.getPrimaryDisplay();
-    const found = all.find(d => d.id === displayId);
+    if (displayId == null) return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const found = all.find(d => String(d.id) === String(displayId));
     return found || screen.getPrimaryDisplay();
   }
 

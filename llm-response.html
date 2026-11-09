@@ -6,6 +6,7 @@
     <title>OpenCluely</title>
     <script src="lib/markdown.js"></script>
     <script src="lib/mathrender.js"></script>
+    <script src="lib/response-parts.js"></script>
     <style>
         .text-white { color: white; }
         .text-gray-300 { color: #d1d5db; }
@@ -38,6 +39,11 @@
             color: white;
         }
         .markdown-content h1 { font-size: 1.2rem; }
+        .qa-entry { padding: 16px 0; border-bottom: 1px solid rgba(255,255,255,0.55); }
+        .qa-entry:last-child { border-bottom: 0; }
+        .qa-question { color: #fff; font-weight: 700; white-space: pre-wrap; margin-bottom: 10px; }
+        .qa-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 5px; color: #fff; }
+        .qa-answer, .qa-answer * { color: #72ec9d !important; font-weight: 700; text-shadow: -1px 0 #000, 1px 0 #000, 0 -1px #000, 0 1px #000; }
         .markdown-content h2 { font-size: 1.1rem; }
         .markdown-content h3 { font-size: 1rem; }
         .markdown-content p { margin-bottom: 0.8rem; color: white; font-size: 0.875rem; }
@@ -415,14 +421,50 @@
             border-color: rgba(76,175,80,0.95); 
             transform: scale(0.98);
         }
+        body { background: rgba(18, 22, 30, 0.55); border-radius: 8px; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+        .full-content-inner { backdrop-filter: none; }
+        .code-only .split-layout { grid-template-columns: 1fr; }
+        .code-only .text-panel { display: none; }
+        .panel-content::-webkit-scrollbar, .full-content-inner::-webkit-scrollbar {
+            display: block; width: 8px; height: 8px;
+        }
+        .panel-content::-webkit-scrollbar-thumb, .full-content-inner::-webkit-scrollbar-thumb {
+            background: #526078; border-radius: 6px;
+        }
+        .panel-content, .full-content-inner { scrollbar-width: thin; user-select: text; }
+        .window-title { flex: 1; }
+        .window-controls .window-btn { width: auto; min-width: 24px; padding: 0 7px; }
+        body, .full-content-inner, .code-block, .code-header, .code-content,
+        .markdown-content pre, .markdown-content code, .window-header {
+            background: transparent; backdrop-filter: none; border-color: transparent; box-shadow: none;
+        }
+        body { text-shadow: 0 1px 2px #000, 0 0 4px #000; }
+        .pass-through .window-controls { visibility: hidden; }
+        body { background: rgba(38, 38, 40, 0.16); border: 1px solid rgba(255,255,255,0.85); box-sizing: border-box; }
+        .main-container { width: 100%; height: 100%; }
+        .window-header { border-bottom: 1px solid rgba(255,255,255,0.18); }
+        .code-summary { padding: 0 4px 12px; }
+        .annotated-source { padding: 12px; overflow-x: auto; }
+        .annotated-line { margin: 0 0 13px; }
+        .line-explanation { color: #72ec9d; font: 700 13px/1.5 system-ui, sans-serif; margin-bottom: 3px; }
+        .source-line { display: flex; gap: 12px; white-space: pre; font: 13px/1.6 Consolas, monospace; }
+        .source-line code { color: #fff; padding: 0; white-space: pre; font-weight: 700; }
+        .line-explanation, .source-line code {
+            -webkit-text-stroke: 0.45px #000;
+            paint-order: stroke fill;
+            text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 1px 3px #000;
+        }
+        .line-number { color: #b1b1b5; user-select: none; min-width: 2ch; text-align: right; }
+        .code-header { position: relative; padding-right: 70px; }
     </style>
 </head>
 <body class="text-white">
     <div class="main-container has-header">
         <!-- Draggable Header -->
         <div class="window-header">
-            <div class="window-title">AI Response</div>
+            <div class="window-title" id="panelTitle">Question &amp; Answer · drag to move</div>
             <div class="window-controls">
+                <button id="show-panels-btn" class="window-btn" title="Reopen both answer windows">Panels</button>
                 <button id="close-window-btn" class="window-btn window-btn-close" title="Close">×</button>
             </div>
         </div>
@@ -475,6 +517,16 @@
         let isInteractive = false;
         let scrollableElements = [];
         let initialized = false;
+        let pendingQuestion = '';
+        let pendingAnswer = '';
+        let pendingMessageId = null;
+        const isCodePanel = new URLSearchParams(location.search).get('panel') === 'code';
+        document.body.classList.add('pass-through');
+        if (isCodePanel) {
+            document.body.classList.add('code-only');
+            document.getElementById('panelTitle').textContent = 'Code · drag to move';
+        }
+        document.getElementById('show-panels-btn').addEventListener('click', () => window.electronAPI.showAnswerWindows());
         
         // Immediate logging to verify script execution
         console.log('[LLM-RESPONSE] Script tag executed');
@@ -525,6 +577,55 @@
             
             // Set up event listeners using electronAPI from preload script
             if (window.electronAPI) {
+                if (!isCodePanel) {
+                    window.electronAPI.onRecordingStopped(() => document.getElementById('live-question')?.remove());
+                    window.electronAPI.onSpeechError(() => document.getElementById('live-question')?.remove());
+                    window.electronAPI.onLlmError((_event, data) => {
+                        if (!pendingQuestion) return;
+                        pendingAnswer = 'Request failed: ' + (data?.error || data?.message || 'Please retry.');
+                        updatePendingQA();
+                    });
+                    window.electronAPI.onInterimTranscription((_event, data) => {
+                        if (!data?.text) return;
+                        // Speech for the next question can arrive while an earlier answer streams.
+                        let live = document.getElementById('live-question');
+                        if (!live) {
+                            const full = document.getElementById('full-markdown');
+                            if (!full.querySelector('.qa-entry')) full.replaceChildren();
+                            live = document.createElement('div');
+                            live.id = 'live-question';
+                            live.className = 'qa-question qa-entry';
+                        }
+                        live.textContent = 'Listening: ' + data.text;
+                        document.getElementById('full-markdown').appendChild(live);
+                        revealQA();
+                        scrollToNewest();
+                    });
+                    window.electronAPI.onTranscriptionReceived(() => document.getElementById('live-question')?.remove());
+                    window.electronAPI.onTranscriptionLlmResponseStart((_event, data) => {
+                        if (!data.question) return;
+                        pendingMessageId = data.messageId;
+                        pendingQuestion = data.question;
+                        pendingAnswer = '';
+                        updatePendingQA();
+                    });
+                    window.electronAPI.onTranscriptionLlmResponseChunk((_event, data) => {
+                        if (data.messageId !== pendingMessageId) return;
+                        pendingAnswer += data.delta || '';
+                        updatePendingQA();
+                    });
+                }
+                window.electronAPI.onInteractionModeChanged((_event, interactive) => {
+                    isInteractive = interactive;
+                    document.body.classList.toggle('pass-through', !interactive);
+                });
+                window.electronAPI.onPanelScroll((_event, delta) => {
+                    const el = document.querySelector(isCodePanel && hasCode ? '.code-panel .panel-content' : '.full-content-inner');
+                    el?.scrollBy({ left: delta.x, top: delta.y, behavior: 'auto' });
+                });
+                window.electronAPI.onScreenshotStatus((_event, data) => {
+                    document.getElementById('panelTitle').textContent = (isCodePanel ? 'Code' : 'Question & Answer') + ' · ' + data.text;
+                });
                 console.log('[LLM-RESPONSE] Setting up IPC listeners...');
                 
                 // Set up show-loading event listener
@@ -573,9 +674,14 @@
             } else {
                 console.error('[LLM-RESPONSE] electronAPI not available!');
             }
+            hideLoadingState();
+            displayResponse({ content: isCodePanel ? 'Code will appear here. Clicks pass through; hover and scroll to read. Ctrl+Shift+I enables moving and copying.' : 'Press backslash to save screenshots, then backtick to send them. Clicks pass through; hover and scroll to read. Ctrl+Shift+I enables moving and copying.' });
+            setupScrolling();
         } // end initLLMResponseWindow
 
         function showLoadingState() {
+            // Keep earlier Q&A readable while the next answer is generated.
+            if (!isCodePanel && document.querySelector('.qa-entry')) return;
             const loadingElement = document.getElementById('loading');
             const responseElement = document.getElementById('response-content');
             
@@ -641,6 +747,12 @@
         }
 
         function displayResponse(data) {
+            if (data.metadata?.messageId && data.metadata.messageId === pendingMessageId) {
+                pendingQuestion = '';
+                pendingAnswer = '';
+                pendingMessageId = null;
+                document.getElementById('pending-qa')?.remove();
+            }
             // Show content
             const responseElement = document.getElementById('response-content');
             
@@ -661,29 +773,23 @@
             }
             
             // Check if response contains code blocks
-            const codeBlocks = extractCodeBlocks(response);
-            hasCode = codeBlocks.length > 0;
+            const parts = window.responseParts.splitResponse(response);
+            const codeBlocks = parts.codeBlocks;
+            hasCode = isCodePanel && codeBlocks.length > 0;
 
             // Calculate content metrics for dynamic sizing
             const contentMetrics = calculateContentMetrics(response, codeBlocks);
 
-            if (hasCode) {
-                // Split layout: text on left, code on right
+            if (!isCodePanel && data.qaHistory?.length) {
+                displayQAHistory(data.qaHistory);
+            } else if (isCodePanel && hasCode) {
                 displaySplitLayout(response, codeBlocks);
             } else {
-                // Full layout: all content in one panel
-                displayFullLayout(response);
+                displayFullLayout(isCodePanel
+                    ? parts.isCoding ? parts.text : 'Coding solutions appear here.'
+                    : parts.isCoding ? 'Non-coding questions and answers appear here.' : parts.text);
             }
-            
-            // Request dynamic window sizing based on content
-            setTimeout(() => {
-                window.electronAPI.resizeLlmWindowForContent(contentMetrics)
-                    .then(result => {
-                    })
-                    .catch(error => {
-                        console.error('Failed to resize window:', error);
-                    });
-            }, 200);
+            // Keep the size chosen by the user across answers.
         }
 
         function setupScrolling() {
@@ -701,7 +807,7 @@
                 }
                 // Reset scroll positions and ensure elements are focusable
                 scrollableElements.forEach(element => {
-                    element.scrollTop = 0;
+                    element.scrollTop = isCodePanel ? 0 : element.scrollHeight;
                     element.scrollLeft = 0;
                     element.setAttribute('tabindex', '0');
                 });
@@ -757,16 +863,7 @@
         }
 
         function extractCodeBlocks(text) {
-            const blocks = [];
-            if (!text) return blocks;
-            const regex = /(```|~~~)([^\n]*)\n([\s\S]*?)\1/g; // supports ```lang and ~~~lang
-            let match;
-            while ((match = regex.exec(text)) !== null) {
-                const info = (match[2] || '').trim();
-                const langToken = info.split(/\s+/)[0] || 'text';
-                blocks.push({ language: langToken, code: match[3], fullMatch: match[0] });
-            }
-            return blocks;
+            return window.responseParts.splitResponse(text).codeBlocks;
         }
 
         function attachCopy(btn, text) {
@@ -840,6 +937,10 @@
             // Render code blocks
             const codeContainer = document.getElementById('code-content');
             codeContainer.innerHTML = '';
+            const summary = document.createElement('div');
+            summary.className = 'code-summary markdown-content';
+            summary.innerHTML = renderMarkdown(window.responseParts.splitResponse(response).text);
+            codeContainer.appendChild(summary);
 
             if (codeBlocks.length === 0) {
                 codeContainer.innerHTML = '<div class="no-code">No code examples found</div>';
@@ -847,19 +948,38 @@
                 codeBlocks.forEach((block, index) => {
                     const codeBlock = document.createElement('div');
                     codeBlock.className = 'code-block';
-                    codeBlock.innerHTML = `
-                        <div class="code-header">${block.language.toUpperCase()}</div>
-                        <div class="code-content">
-                            <pre><code class="language-${block.language}">${escapeHtml(block.code)}</code></pre>
-                        </div>
-                    `;
-                    const pre = codeBlock.querySelector('pre');
-                    pre.style.position = 'relative';
+                    const header = document.createElement('div');
+                    header.className = 'code-header';
+                    header.textContent = block.language.toUpperCase();
+                    codeBlock.appendChild(header);
+                    const source = document.createElement('div');
+                    source.className = 'annotated-source';
+                    block.lines.forEach((line, lineIndex) => {
+                        const row = document.createElement('div');
+                        row.className = 'annotated-line';
+                        if (line.code.trim()) {
+                            const explanation = document.createElement('div');
+                            explanation.className = 'line-explanation';
+                            explanation.textContent = line.explanation || 'Line description unavailable.';
+                            row.appendChild(explanation);
+                        }
+                        const codeLine = document.createElement('div');
+                        codeLine.className = 'source-line';
+                        const number = document.createElement('span');
+                        number.className = 'line-number';
+                        number.textContent = lineIndex + 1;
+                        const code = document.createElement('code');
+                        code.textContent = line.code || ' ';
+                        codeLine.append(number, code);
+                        row.appendChild(codeLine);
+                        source.appendChild(row);
+                    });
+                    codeBlock.appendChild(source);
                     const btn = document.createElement('button');
                     btn.className = 'copy-btn';
                     btn.textContent = 'Copy';
-                    attachCopy(btn, block.code || '');
-                    pre.appendChild(btn);
+                    attachCopy(btn, block.cleanCode || '');
+                    header.appendChild(btn);
 
                     codeContainer.appendChild(codeBlock);
                 });
@@ -869,6 +989,67 @@
             if (typeof Prism !== 'undefined') {
                 Prism.highlightAll();
             }
+        }
+
+        function revealQA() {
+            hideLoadingState();
+            document.getElementById('response-content').classList.remove('hidden');
+            document.getElementById('split-layout').classList.add('hidden');
+            document.getElementById('full-content').classList.remove('hidden');
+        }
+
+        function scrollToNewest() {
+            requestAnimationFrame(() => {
+                const el = document.querySelector('.full-content-inner');
+                if (el) { el.style.scrollBehavior = 'auto'; el.scrollTop = el.scrollHeight; }
+            });
+        }
+
+        function updatePendingQA() {
+            if (!pendingQuestion) return;
+            revealQA();
+            const full = document.getElementById('full-markdown');
+            if (!full.querySelector('.qa-entry')) full.replaceChildren();
+            let section = document.getElementById('pending-qa');
+            if (!section) {
+                section = document.createElement('section');
+                section.id = 'pending-qa';
+                section.className = 'qa-entry';
+                const question = document.createElement('div');
+                question.className = 'qa-question';
+                const answer = document.createElement('div');
+                answer.className = 'qa-answer';
+                section.append(question, answer);
+                full.appendChild(section);
+            }
+            section.querySelector('.qa-question').textContent = pendingQuestion;
+            section.querySelector('.qa-answer').innerHTML = renderMarkdown(pendingAnswer || 'Thinking…');
+            scrollToNewest();
+        }
+
+        function displayQAHistory(entries) {
+            document.getElementById('split-layout').classList.add('hidden');
+            document.getElementById('full-content').classList.remove('hidden');
+            const full = document.getElementById('full-markdown');
+            full.replaceChildren();
+            entries.forEach((entry, index) => {
+                const section = document.createElement('section');
+                section.className = 'qa-entry';
+                const label = document.createElement('div');
+                label.className = 'qa-label';
+                label.textContent = `Question ${index + 1}`;
+                const question = document.createElement('div');
+                question.className = 'qa-question';
+                question.textContent = entry.question || 'Question / response';
+                const answer = document.createElement('div');
+                answer.className = 'qa-answer';
+                answer.innerHTML = renderMarkdown(entry.answer);
+                section.append(label, question, answer);
+                full.appendChild(section);
+            });
+            if (window.renderMathInElement) window.renderMathInElement(full);
+            updatePendingQA();
+            scrollToNewest();
         }
 
         function displayFullLayout(response) {

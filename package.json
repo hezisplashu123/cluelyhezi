@@ -7,6 +7,7 @@
     "start": "env -u ELECTRON_RUN_AS_NODE electron .",
     "dev": "env -u ELECTRON_RUN_AS_NODE electron . --no-sandbox --disable-gpu",
     "test-speech": "node scripts/test-speech.js",
+    "test-resume-context": "node scripts/test-resume-context.cjs",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
@@ -17,7 +18,7 @@
     "clean": "rm -rf dist/",
     "rebuild": "npm run clean && npm run build",
     "release": "npm run clean && npm run build:all",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps"
   },
   "author": {
     "name": "TechyCSR",
@@ -37,12 +38,14 @@
     "marked": "^15.0.12",
     "microsoft-cognitiveservices-speech-sdk": "^1.40.0",
     "node-record-lpcm16": "^1.0.1",
+    "openai": "^7.39.0",
     "prismjs": "^1.30.0",
     "winston": "^3.17.0",
-    "winston-daily-rotate-file": "^4.7.1"
+    "winston-daily-rotate-file": "^4.7.1",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
-    "electron": "^29.1.0",
+    "electron": "^44.9.0",
     "electron-builder": "^24.13.3"
   },
   "build": {
@@ -59,11 +62,14 @@
       "!.env*",
       "!.venv-whisper/**/*",
       "!.whisper-models/**/*",
-      "!eng.traineddata"
+      "!eng.traineddata",
+      "!artifacts/**/*"
     ],
     "asarUnpack": [
       "assests/icons/**/*",
-      "prompts/**/*"
+      "prompts/**/*",
+      "scripts/transcribe-whisper.py",
+      "scripts/windows-input.ps1"
     ],
     "mac": {
       "category": "public.app-category.utilities",

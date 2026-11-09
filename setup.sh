@@ -46,13 +46,13 @@ Options:
   -h, --help              Show this help
 
 Environment variables:
-  GEMINI_API_KEY          If provided, writes into .env
+  OPENAI_API_KEY          If provided, writes into .env
   WHISPER_MODEL           Whisper model to configure (default: turbo)
   WHISPER_LANGUAGE        Whisper language to configure (default: en)
   WHISPER_SEGMENT_MS      Segment size in ms (default: 4000)
 
 Example:
-  GEMINI_API_KEY=your_key_here ./setup.sh --install-system-deps
+  OPENAI_API_KEY=your_key_here ./setup.sh --install-system-deps
 EOF
 }
 
@@ -91,7 +91,7 @@ detect_os() {
 
   case "$OS_NAME" in
     windows)
-      PYTHON_BIN="python"
+      PYTHON_BIN="py"
       WHISPER_PIP_PATH="${WHISPER_VENV_DIR}/Scripts/pip.exe"
       WHISPER_COMMAND_PATH="${WHISPER_VENV_DIR}/Scripts/whisper.exe"
       ;;
@@ -135,32 +135,32 @@ upsert_env() {
   fi
 }
 
-ensure_gemini_key() {
-  if [[ -n "${GEMINI_API_KEY:-}" ]]; then
-    upsert_env "GEMINI_API_KEY" "$GEMINI_API_KEY"
+ensure_openai_key() {
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    upsert_env "OPENAI_API_KEY" "$OPENAI_API_KEY"
   fi
 
-  # GEMINI_API_KEY is now OPTIONAL during setup. The app's first-run
+  # OPENAI_API_KEY is now OPTIONAL during setup. The app's first-run
   # flow will auto-open the Settings window if the key is missing and
   # guide the user to enter it. Hard-blocking at install time makes
   # CI / packaging / scripted installs harder for no real benefit.
 
-  if ! grep -q '^GEMINI_API_KEY=' .env 2>/dev/null; then
+  if ! grep -q '^OPENAI_API_KEY=' .env 2>/dev/null; then
     # Make sure the key exists in .env even if unset — the app reads
     # this on first-run to know whether onboarding is needed.
-    echo "GEMINI_API_KEY=your_gemini_api_key_here" >> .env
+    echo "OPENAI_API_KEY=your_openai_api_key_here" >> .env
   fi
 
-  if grep -q 'your_gemini_api_key_here' .env 2>/dev/null; then
+  if grep -q 'your_openai_api_key_here' .env 2>/dev/null; then
     echo ""
     echo "=========================================="
-    echo " No Gemini API key detected"
+    echo " No OpenAI API key detected"
     echo "=========================================="
     echo ""
     echo "The app will start, but AI features won't work until you set"
-    echo "GEMINI_API_KEY in .env (or via the Settings window on first launch)."
+    echo "OPENAI_API_KEY in .env (or via the Settings window on first launch)."
     echo ""
-    echo "Get a free key from: https://aistudio.google.com/"
+    echo "Create an API key at: https://platform.openai.com/api-keys"
     echo ""
     echo "Setup will continue without blocking."
     echo ""
@@ -310,7 +310,7 @@ echo "Node: $(node -v)"
 echo "npm:  $(npm -v)"
 
 ensure_env_file
-ensure_gemini_key
+ensure_openai_key
 install_system_deps
 install_node_deps
 setup_whisper_env

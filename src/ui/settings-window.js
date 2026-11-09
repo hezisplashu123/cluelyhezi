@@ -14,6 +14,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const whisperLanguageInput = document.getElementById('whisperLanguage');
     const whisperSegmentMsInput = document.getElementById('whisperSegmentMs');
     const geminiKeyInput = document.getElementById('geminiKey');
+    const resumeTextInput = document.getElementById('resumeText');
+    const resumeStatus = document.getElementById('resumeStatus');
+    const saveResumeButton = document.getElementById('saveResumeButton');
+    const clearResumeButton = document.getElementById('clearResumeButton');
     const windowGapInput = document.getElementById('windowGap');
     const codingLanguageSelect = document.getElementById('codingLanguage');
     const activeSkillSelect = document.getElementById('activeSkill');
@@ -82,11 +86,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (whisperLanguageInput) whisperLanguageInput.value = settings.whisperLanguage || '';
         if (whisperSegmentMsInput) whisperSegmentMsInput.value = settings.whisperSegmentMs || '';
         if (geminiKeyInput) geminiKeyInput.value = settings.geminiKey || '';
+        if (resumeTextInput) resumeTextInput.value = settings.resumeText || '';
+        updateResumeStatus(settings.resumeStatus);
         if (windowGapInput) windowGapInput.value = settings.windowGap || '';
 
-        // Set C++ as default if no coding language is specified
+        // Set Java as default if no coding language is specified
         if (codingLanguageSelect) {
-            codingLanguageSelect.value = settings.codingLanguage || 'cpp';
+            codingLanguageSelect.value = settings.codingLanguage || 'java';
         }
 
         if (settings.activeSkill && activeSkillSelect) activeSkillSelect.value = settings.activeSkill;
@@ -105,6 +111,20 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         updateSpeechFieldStates();
+    };
+
+    const updateResumeStatus = (status) => {
+        if (!resumeStatus) return;
+        resumeStatus.classList.toggle('error', !!status?.error);
+        if (!status?.configured) {
+            resumeStatus.textContent = 'No resume background is saved.';
+        } else if (status.error) {
+            resumeStatus.textContent = status.error;
+        } else {
+            const tokens = Number(status.estimatedTokens || 0).toLocaleString();
+            const sizeKb = Math.max(1, Math.ceil(Number(status.bytes || 0) / 1024));
+            resumeStatus.textContent = `Loaded ${sizeKb} KB · about ${tokens} extra input tokens per answer.`;
+        }
     };
 
     // Load settings when window opens
@@ -197,6 +217,28 @@ document.addEventListener('DOMContentLoaded', () => {
         speechProviderSelect.addEventListener('change', () => {
             updateSpeechFieldStates();
             saveSettings();
+        });
+    }
+
+    if (saveResumeButton) {
+        saveResumeButton.addEventListener('click', async () => {
+            try {
+                const result = await window.electronAPI.saveResumeContext(resumeTextInput?.value || '');
+                if (result?.success) updateResumeStatus(result.status);
+                else updateResumeStatus({ configured: true, error: result?.error || 'Could not save resume background.' });
+            } catch (error) {
+                updateResumeStatus({ configured: true, error: error.message || 'Could not save resume background.' });
+            }
+        });
+    }
+
+    if (clearResumeButton) {
+        clearResumeButton.addEventListener('click', async () => {
+            const result = await window.electronAPI.saveResumeContext('');
+            if (result?.success) {
+                if (resumeTextInput) resumeTextInput.value = '';
+                updateResumeStatus(result.status);
+            } else updateResumeStatus({ configured: true, error: result?.error || 'Could not clear resume background.' });
         });
     }
 

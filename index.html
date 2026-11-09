@@ -27,7 +27,8 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 16px;
+        gap: 8px;
+        box-sizing: border-box;
         padding: 0 12px;
         color: rgba(255, 255, 255, 0.9);
         font-size: 11px;
@@ -42,6 +43,9 @@
       }
 
       .command-item {
+        background: transparent;
+        border: 0;
+        font-family: inherit;
         display: flex;
         align-items: center;
         gap: 8px;
@@ -353,13 +357,22 @@
   </head>
   <body>
     <div class="command-tab">
-      <div class="command-item">
+      <button type="button" class="command-item" id="captureScreenshot" title="After releasing VMware with Ctrl+Alt, press backslash or click here to capture.">
         <i class="fas fa-camera"></i>
-        <span>⌘⇧S</span>
+        <span id="screenshotCount">\ 0</span>
+      </button>
+      <div class="command-separator"></div>
+      <button type="button" class="command-item" id="submitScreenshots" title="After releasing VMware with Ctrl+Alt, press backtick or click here to submit.">
+        <i class="fas fa-paper-plane"></i>
+        <span>`</span>
+      </button>
+      <div class="command-separator"></div>
+      <div class="command-item" id="micButton" title="Listen to computer audio (Alt+R)" aria-label="Toggle computer audio listening">
+        <i class="fas fa-volume-high"></i>
       </div>
       <div class="command-separator"></div>
-      <div class="command-item" id="micButton">
-        <i class="fas fa-microphone"></i>
+      <div class="command-item" id="answerWindowsButton" title="Open answer and code windows (Ctrl+Shift+O)">
+        <i class="fas fa-window-restore"></i>
       </div>
       <div class="command-separator"></div>
       <div class="command-item" id="skillIndicator">
@@ -373,7 +386,7 @@
           <option value="cpp">C++</option>
           <option value="c">C</option>
           <option value="python">Python</option>
-          <option value="java">Java</option>
+          <option value="java" selected>Java</option>
           <option value="javascript">JavaScript</option>
         </select>
       </div>
@@ -404,8 +417,13 @@
               + <span class="kbd">Shift</span>
               + <span class="kbd">S</span>
             </td>
-            <td>Capture screenshot and analyze</td>
+            <td>Queue screenshot (also \)</td>
           </tr>
+          <tr>
+            <td><span class="kbd">`</span> / Ctrl+Shift+Enter</td>
+            <td>Analyze all queued screenshots</td>
+          </tr>
+          <tr><td>Ctrl/Cmd+Shift+O</td><td>Open answer and code windows</td></tr>
           <tr>
             <td>
               <span class="kbd">Ctrl/Cmd</span>
