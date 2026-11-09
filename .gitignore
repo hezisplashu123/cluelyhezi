@@ -4,6 +4,10 @@ node_modules/
 .whisper-models/
 eng.traineddata
 dist/
+<<<<<<< HEAD
 artifacts/
+=======
+bin/
+>>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
 .DS_Store
 *.log

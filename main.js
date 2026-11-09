@@ -1,8 +1,13 @@
 const path = require("path");
 const fs = require("fs");
+<<<<<<< HEAD
 const { app, BrowserWindow, globalShortcut, session, ipcMain, screen } = require("electron");
 const { configureSystemAudioCapture, allowAudioCapturePermission } = require('./src/core/system-audio');
 const { resumeContext, MAX_RESUME_BYTES } = require('./src/core/resume-context');
+=======
+const { fileURLToPath } = require("url");
+const { app, BrowserWindow, globalShortcut, session, ipcMain } = require("electron");
+>>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
 
 // ── Resolve a stable .env location ──
 // In packaged builds process.cwd() is unstable and frequently read-only
@@ -355,14 +360,65 @@ class ApplicationController {
   }
 
   setupPermissions() {
+<<<<<<< HEAD
     configureSystemAudioCapture(session.defaultSession);
     session.defaultSession.setPermissionRequestHandler(
       (webContents, permission, callback) => {
         const allowedPermissions = ["microphone", "camera", "display-capture"];
         const granted = allowedPermissions.includes(permission) ||
           allowAudioCapturePermission(webContents.getURL(), permission);
+=======
+    const appSession = session.defaultSession;
+    const isTrustedAppContents = (webContents) => {
+      if (!webContents || webContents.isDestroyed()) {
+        return false;
+      }
+      try {
+        const pagePath = path.resolve(fileURLToPath(webContents.getURL()));
+        const appRoot = path.resolve(__dirname);
+        const normalizeForComparison = (value) => process.platform === "win32"
+          ? value.toLowerCase()
+          : value;
+        const page = normalizeForComparison(pagePath);
+        const root = normalizeForComparison(appRoot + path.sep);
+        return page.startsWith(root);
+      } catch (_) {
+        return false;
+      }
+    };
+>>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
 
-        logger.debug("Permission request", { permission, granted });
+    // Electron exposes camera/microphone access as the single `media`
+    // permission. The requested device type is provided separately in details.
+    appSession.setPermissionCheckHandler(
+      (webContents, permission, _requestingOrigin, details = {}) => {
+        if (!isTrustedAppContents(webContents)) {
+          return false;
+        }
+        if (permission === "media") {
+          return !details.mediaType || details.mediaType === "audio";
+        }
+        return permission === "display-capture";
+      }
+    );
+
+    appSession.setPermissionRequestHandler(
+      (webContents, permission, callback, details = {}) => {
+        let granted = false;
+        if (isTrustedAppContents(webContents)) {
+          if (permission === "media") {
+            const mediaTypes = Array.isArray(details.mediaTypes) ? details.mediaTypes : [];
+            granted = mediaTypes.length === 0 || mediaTypes.includes("audio");
+          } else {
+            granted = permission === "display-capture";
+          }
+        }
+
+        logger.debug("Permission request", {
+          permission,
+          mediaTypes: details.mediaTypes || [],
+          granted
+        });
         callback(granted);
       }
     );
@@ -403,15 +459,11 @@ class ApplicationController {
 
   setupServiceEventHandlers() {
     speechService.on("recording-started", () => {
-      BrowserWindow.getAllWindows().forEach((window) => {
-        window.webContents.send("recording-started");
-      });
+      windowManager.handleRecordingStarted();
     });
 
     speechService.on("recording-stopped", () => {
-      BrowserWindow.getAllWindows().forEach((window) => {
-        window.webContents.send("recording-stopped");
-      });
+      windowManager.handleRecordingStopped();
     });
 
     speechService.on("transcription", (text, metadata) => {
@@ -853,7 +905,7 @@ class ApplicationController {
       try {
         const installer = this.getWhisperInstaller();
         const sender = event.sender;
-        const result = await installer.downloadModel(modelName || 'turbo', {
+        const result = await installer.downloadModel(modelName || 'small', {
           onProgress: (line) => {
             try { sender.send("install-progress", line); } catch (_) { /* ignore */ }
           },
@@ -983,7 +1035,6 @@ class ApplicationController {
     if (currentStatus.isRecording) {
       try {
         speechService.stopRecording();
-        windowManager.hideChatWindow();
         logger.info("Speech recognition stopped via global shortcut");
       } catch (error) {
         logger.error("Error stopping speech recognition:", error);
@@ -1287,11 +1338,9 @@ class ApplicationController {
       return;
     }
 
-    // Show the live transcript right away in all windows.
+    // Route speech UI events according to the user's response-target setting.
     sessionManager.addUserInput(fragment, 'speech');
-    BrowserWindow.getAllWindows().forEach((window) => {
-      window.webContents.send("transcription-received", { text: fragment });
-    });
+    this.sendToVoiceResponseWindows("transcription-received", { text: fragment });
 
     if (metadata.committed) {
       // Live transcription already waited for 1.5 seconds of actual silence.
@@ -1306,7 +1355,16 @@ class ApplicationController {
 
     if (this._utteranceTimer) {
       clearTimeout(this._utteranceTimer);
+      this._utteranceTimer = null;
     }
+
+    // Manual capture emits one complete transcript after the user presses stop,
+    // so no debounce/coalescing delay is needed.
+    if (speechService.isManualCaptureMode()) {
+      this.dispatchCoalescedUtterance();
+      return;
+    }
+
     this._utteranceTimer = setTimeout(() => {
       this._utteranceTimer = null;
       this.dispatchCoalescedUtterance();
@@ -1381,27 +1439,26 @@ class ApplicationController {
       const skillsRequiringProgrammingLanguage = ['dsa'];
       const needsProgrammingLanguage = skillsRequiringProgrammingLanguage.includes(this.activeSkill);
 
-      // Stream the answer so it renders progressively in the chat + overlay.
+      // Stream the answer progressively to the configured speech target.
       // A unique messageId ties the start/chunk/final events to one bubble so
       // the UI never duplicates or interleaves concurrent responses.
       this._responseSeq = (this._responseSeq || 0) + 1;
       messageId = `tr-${Date.now()}-${this._responseSeq}`;
-      windowManager.broadcastToAllWindows("transcription-llm-response-start", {
+      this.sendToVoiceResponseWindows("transcription-llm-response-start", {
         messageId,
         question: cleanText,
         skill: this.activeSkill
       });
-      // Surface the overlay immediately so streamed tokens are visible there
-      // too, instead of the overlay only appearing once the full answer lands.
-      windowManager.showLLMLoading();
-
+      if (this.shouldShowVoiceOverlay()) {
+        windowManager.showLLMLoading();
+      }
       const llmResult = await llmService.processTranscriptionWithIntelligentResponseStream(
         cleanText,
         this.activeSkill,
         sessionHistory.recent,
         needsProgrammingLanguage ? this.codingLanguage : null,
         (delta) => {
-          windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
+          this.sendToVoiceResponseWindows("transcription-llm-response-chunk", {
             messageId,
             delta
           });
@@ -1419,6 +1476,7 @@ class ApplicationController {
         isTranscriptionResponse: true
       });
 
+<<<<<<< HEAD
       // Send response to chat windows
       this.broadcastTranscriptionLLMResponse(llmResult);
 
@@ -1433,6 +1491,17 @@ class ApplicationController {
         usedFallback: llmResult.metadata.usedFallback,
         isTranscriptionResponse: true
       });
+=======
+      this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
+      if (this.shouldShowVoiceOverlay()) {
+        windowManager.showLLMResponse(llmResult.response, {
+          skill: this.activeSkill,
+          processingTime: llmResult.metadata.processingTime,
+          usedFallback: llmResult.metadata.usedFallback,
+          isTranscriptionResponse: true
+        });
+      }
+>>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
 
       logger.info("Transcription LLM response completed", {
         responseLength: llmResult.response.length,
@@ -1452,7 +1521,7 @@ class ApplicationController {
       // Try to provide a fallback response
       try {
         const fallbackResult = llmService.generateIntelligentFallbackResponse(text, this.activeSkill);
-        // Carry the streaming messageId so the chat/overlay replace the live
+        // Carry the streaming messageId so the target replaces the live
         // bubble instead of leaving it stuck and appending a duplicate.
         if (messageId) {
           fallbackResult.metadata = { ...fallbackResult.metadata, messageId };
@@ -1466,14 +1535,15 @@ class ApplicationController {
           fallbackReason: error.message
         });
 
-        this.broadcastTranscriptionLLMResponse(fallbackResult);
-        // Mirror to overlay window for consistency
-        windowManager.showLLMResponse(fallbackResult.response, {
-          skill: this.activeSkill,
-          processingTime: fallbackResult.metadata.processingTime,
-          usedFallback: true,
-          isTranscriptionResponse: true
-        });
+        this.sendTranscriptionLLMResponseToVoiceTargets(fallbackResult);
+        if (this.shouldShowVoiceOverlay()) {
+          windowManager.showLLMResponse(fallbackResult.response, {
+            skill: this.activeSkill,
+            processingTime: fallbackResult.metadata.processingTime,
+            usedFallback: true,
+            isTranscriptionResponse: true
+          });
+        }
         logger.info("Used fallback response for transcription", {
           skill: this.activeSkill,
           fallbackResponse: fallbackResult.response
@@ -1553,6 +1623,48 @@ class ApplicationController {
     windowManager.broadcastToAllWindows("transcription-llm-response", broadcastData);
   }
 
+  sendToChatWindow(channel, data) {
+    const chatWindow = windowManager.getWindow("chat");
+    if (!chatWindow || chatWindow.isDestroyed()) {
+      logger.warn("Chat window unavailable for speech event", { channel });
+      return;
+    }
+    chatWindow.webContents.send(channel, data);
+  }
+
+  getVoiceResponseTarget() {
+    const configured = String(process.env.WHISPER_RESPONSE_TARGET || 'both').trim().toLowerCase();
+    return ['chat', 'overlay', 'both'].includes(configured) ? configured : 'both';
+  }
+
+  shouldShowVoiceOverlay() {
+    return ['overlay', 'both'].includes(this.getVoiceResponseTarget());
+  }
+
+  sendToVoiceResponseWindows(channel, data) {
+    const target = this.getVoiceResponseTarget();
+    if (target === 'chat' || target === 'both') {
+      this.sendToChatWindow(channel, data);
+    }
+    if (target === 'overlay' || target === 'both') {
+      const responseWindow = windowManager.getWindow("llmResponse");
+      if (responseWindow && !responseWindow.isDestroyed()) {
+        responseWindow.webContents.send(channel, data);
+      }
+    }
+  }
+
+  sendTranscriptionLLMResponseToVoiceTargets(llmResult) {
+    const data = {
+      response: llmResult.response,
+      metadata: llmResult.metadata,
+      messageId: llmResult.metadata && llmResult.metadata.messageId,
+      skill: this.activeSkill,
+      isTranscriptionResponse: true
+    };
+    this.sendToVoiceResponseWindows("transcription-llm-response", data);
+  }
+
   onWindowAllClosed() {
     if (process.platform !== "darwin") {
       app.quit();
@@ -1584,6 +1696,7 @@ class ApplicationController {
     vmControls.stop();
     windowsInput.stop();
     globalShortcut.unregisterAll();
+    speechService.shutdown();
     windowManager.destroyAllWindows();
 
     const sessionStats = sessionManager.getMemoryUsage();
@@ -1622,8 +1735,12 @@ class ApplicationController {
       azureKey: process.env.AZURE_SPEECH_KEY || "",
       azureRegion: process.env.AZURE_SPEECH_REGION || "",
       whisperCommand: process.env.WHISPER_COMMAND || "",
-      whisperModel: process.env.WHISPER_MODEL || "turbo",
-      whisperLanguage: process.env.WHISPER_LANGUAGE || "en",
+      whisperModel: process.env.WHISPER_MODEL || "small",
+      whisperLanguage: process.env.WHISPER_LANGUAGE || "auto",
+      whisperDevice: process.env.WHISPER_DEVICE || "auto",
+      whisperCaptureMode: process.env.WHISPER_CAPTURE_MODE ||
+        (process.env.WHISPER_MANUAL_CAPTURE === "true" ? "manual" : "vad"),
+      whisperResponseTarget: process.env.WHISPER_RESPONSE_TARGET || "both",
       whisperSegmentMs: process.env.WHISPER_SEGMENT_MS || "4000",
       geminiKey: process.env.OPENAI_API_KEY || "",
       resumeText: resumeContext.load().text || "",
@@ -1683,6 +1800,15 @@ class ApplicationController {
       }
       if (settings.whisperLanguage !== undefined) {
         envUpdates.WHISPER_LANGUAGE = settings.whisperLanguage;
+      }
+      if (["auto", "cpu", "cuda"].includes(settings.whisperDevice)) {
+        envUpdates.WHISPER_DEVICE = settings.whisperDevice;
+      }
+      if (["manual", "vad"].includes(settings.whisperCaptureMode)) {
+        envUpdates.WHISPER_CAPTURE_MODE = settings.whisperCaptureMode;
+      }
+      if (["chat", "overlay", "both"].includes(settings.whisperResponseTarget)) {
+        envUpdates.WHISPER_RESPONSE_TARGET = settings.whisperResponseTarget;
       }
       if (settings.whisperSegmentMs !== undefined) {
         envUpdates.WHISPER_SEGMENT_MS = String(settings.whisperSegmentMs);

@@ -12,6 +12,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const whisperCommandInput = document.getElementById('whisperCommand');
     const whisperModelInput = document.getElementById('whisperModel');
     const whisperLanguageInput = document.getElementById('whisperLanguage');
+    const whisperDeviceSelect = document.getElementById('whisperDevice');
+    const whisperCaptureModeSelect = document.getElementById('whisperCaptureMode');
+    const whisperResponseTargetSelect = document.getElementById('whisperResponseTarget');
     const whisperSegmentMsInput = document.getElementById('whisperSegmentMs');
     const geminiKeyInput = document.getElementById('geminiKey');
     const resumeTextInput = document.getElementById('resumeText');
@@ -84,6 +87,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (whisperCommandInput) whisperCommandInput.value = settings.whisperCommand || '';
         if (whisperModelInput) whisperModelInput.value = settings.whisperModel || '';
         if (whisperLanguageInput) whisperLanguageInput.value = settings.whisperLanguage || '';
+        if (whisperDeviceSelect) whisperDeviceSelect.value = settings.whisperDevice || 'auto';
+        if (whisperCaptureModeSelect) whisperCaptureModeSelect.value = settings.whisperCaptureMode || 'vad';
+        if (whisperResponseTargetSelect) whisperResponseTargetSelect.value = settings.whisperResponseTarget || 'both';
         if (whisperSegmentMsInput) whisperSegmentMsInput.value = settings.whisperSegmentMs || '';
         if (geminiKeyInput) geminiKeyInput.value = settings.geminiKey || '';
         if (resumeTextInput) resumeTextInput.value = settings.resumeText || '';
@@ -156,6 +162,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (whisperCommandInput) settings.whisperCommand = whisperCommandInput.value;
         if (whisperModelInput) settings.whisperModel = whisperModelInput.value;
         if (whisperLanguageInput) settings.whisperLanguage = whisperLanguageInput.value;
+        if (whisperDeviceSelect) settings.whisperDevice = whisperDeviceSelect.value;
+        if (whisperCaptureModeSelect) settings.whisperCaptureMode = whisperCaptureModeSelect.value;
+        if (whisperResponseTargetSelect) settings.whisperResponseTarget = whisperResponseTargetSelect.value;
         if (whisperSegmentMsInput) settings.whisperSegmentMs = whisperSegmentMsInput.value;
         if (geminiKeyInput) settings.geminiKey = geminiKeyInput.value;
         if (windowGapInput) settings.windowGap = windowGapInput.value;
@@ -189,7 +198,8 @@ document.addEventListener('DOMContentLoaded', () => {
         [azureKeyInput, azureRegionInput].forEach(input => {
             if (input) input.disabled = provider !== 'azure';
         });
-        [whisperCommandInput, whisperModelInput, whisperLanguageInput, whisperSegmentMsInput].forEach(input => {
+        [whisperCommandInput, whisperModelInput, whisperLanguageInput, whisperDeviceSelect,
+            whisperCaptureModeSelect, whisperResponseTargetSelect, whisperSegmentMsInput].forEach(input => {
             if (input) input.disabled = provider !== 'whisper';
         });
     };
@@ -201,6 +211,9 @@ document.addEventListener('DOMContentLoaded', () => {
         whisperCommandInput,
         whisperModelInput,
         whisperLanguageInput,
+        whisperDeviceSelect,
+        whisperCaptureModeSelect,
+        whisperResponseTargetSelect,
         whisperSegmentMsInput,
         geminiKeyInput,
         windowGapInput

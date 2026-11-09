@@ -62,14 +62,25 @@
       "!.env*",
       "!.venv-whisper/**/*",
       "!.whisper-models/**/*",
+<<<<<<< HEAD
       "!eng.traineddata",
       "!artifacts/**/*"
+=======
+      "!bin/**/*",
+      "!scripts/__pycache__/**/*",
+      "!**/*.pyc",
+      "!eng.traineddata"
+>>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
     ],
     "asarUnpack": [
       "assests/icons/**/*",
       "prompts/**/*",
+<<<<<<< HEAD
       "scripts/transcribe-whisper.py",
       "scripts/windows-input.ps1"
+=======
+      "scripts/whisper_worker.py"
+>>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
     ],
     "mac": {
       "category": "public.app-category.utilities",
