@@ -211,13 +211,6 @@ class ChatWindowUI {
             }
         });
         
-        // Global keyboard shortcuts
-        document.addEventListener('keydown', (e) => {
-            if (e.altKey && e.key === 'r') {
-                e.preventDefault();
-                this.elements.micButton.click();
-            }
-        });
     }
 
     handleInteractionEnabled() {

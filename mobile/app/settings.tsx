@@ -1,0 +1,5 @@
+import { useRouter } from 'expo-router';
+import { Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { clearConnection } from '../src/services/connection';
+export default function Settings(){const router=useRouter();return <SafeAreaView style={s.page}><Text style={s.title}>Connection</Text><Text style={s.body}>This phone reconnects automatically with its securely stored desktop credential. Use the button below only to forget this desktop and pair a different one.</Text><Pressable style={s.button} onPress={async()=>{await clearConnection();router.replace('/pair');}}><Text style={s.buttonText}>Forget and pair again</Text></Pressable><Pressable onPress={()=>router.back()}><Text style={s.back}>Back</Text></Pressable></SafeAreaView>}
+const s=StyleSheet.create({page:{flex:1,backgroundColor:'#080b12',padding:22},title:{color:'white',fontSize:28,fontWeight:'800'},body:{color:'#94a3b8',lineHeight:21,marginVertical:16},button:{backgroundColor:'#7f1d1d',padding:15,borderRadius:13},buttonText:{color:'white',fontWeight:'800',textAlign:'center'},back:{color:'#60a5fa',textAlign:'center',marginTop:24}});

@@ -1302,18 +1302,9 @@
         });
       }
 
-      // Global keyboard shortcuts
-      document.addEventListener('keydown', (e) => {
-        if (e.altKey && e.key === 'r') {
-          e.preventDefault();
-          if (!isInteractive || !speechAvailable) return;
-          micButton && micButton.click();
-        }
-      });
-
       // Initialize
       if (!chatHistory || chatHistory.length === 0) {
-        addMessage('Recording in Progress. press Alt+R to stop recording.', 'system');
+        addMessage('Recording in progress. Use the microphone button to stop recording.', 'system');
       }
     </script>
   </body>

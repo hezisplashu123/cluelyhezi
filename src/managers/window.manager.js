@@ -122,7 +122,6 @@ class WindowManager {
       // Pass autoShow so the main window doesn't flash visible during
       // first-run onboarding before the user has configured API keys.
       await this.createMainWindow({ autoShow: showMainWindow });
-      await this.createChatWindow();
       await this.createLLMResponseWindow();
       const codeWindow = await this.createWindow('codeResponse');
       this.windows.set('codeResponse', codeWindow);
@@ -1090,7 +1089,7 @@ class WindowManager {
     }
 
     this.windows.forEach((window, type) => {
-      if (type !== 'llmResponse' && type !== 'codeResponse') {
+      if (type !== 'llmResponse' && type !== 'codeResponse' && type !== 'chat') {
         this.showOnCurrentDesktop(window);
       }
     });
@@ -1851,11 +1850,7 @@ class WindowManager {
   }
 
   showChatWindow() {
-    const chatWindow = this.windows.get('chat');
-    if (chatWindow && !chatWindow.isDestroyed()) {
-      this.showOnCurrentDesktop(chatWindow);
-      logger.debug('Chat window shown');
-    }
+    // Conversations are available on the phone; no desktop chat panel is created.
   }
 
   hideChatWindow() {
@@ -1868,10 +1863,9 @@ class WindowManager {
 
   handleRecordingStarted() {
     this.isRecording = true;
-    this.showChatWindow();
     // Notify all windows about recording state
     this.broadcastToAllWindows('recording-started');
-    logger.debug('Recording started, chat window shown');
+    logger.debug('Recording started');
   }
 
   handleRecordingStopped() {

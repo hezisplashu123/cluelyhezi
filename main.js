@@ -1,13 +1,9 @@
 const path = require("path");
 const fs = require("fs");
-<<<<<<< HEAD
-const { app, BrowserWindow, globalShortcut, session, ipcMain, screen } = require("electron");
+const { fileURLToPath } = require("url");
+const { app, BrowserWindow, session, ipcMain, screen } = require("electron");
 const { configureSystemAudioCapture, allowAudioCapturePermission } = require('./src/core/system-audio');
 const { resumeContext, MAX_RESUME_BYTES } = require('./src/core/resume-context');
-=======
-const { fileURLToPath } = require("url");
-const { app, BrowserWindow, globalShortcut, session, ipcMain } = require("electron");
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
 
 // ── Resolve a stable .env location ──
 // In packaged builds process.cwd() is unstable and frequently read-only
@@ -109,8 +105,12 @@ process.on("unhandledRejection", (reason) => {
 const captureService = require("./src/services/capture.service");
 const speechService = require("./src/services/speech.service");
 const llmService = require("./src/services/llm.service");
-const windowsInput = require('./src/services/windows-input.service');
-const vmControls = require('./src/services/vm-control.service');
+const mouseRouting = require('./src/services/mouse-routing.service');
+const conversationStore = require('./src/services/conversation-store.service');
+const conversationEvents = require('./src/services/conversation-events.service');
+const mobileAuth = require('./src/services/mobile-auth.service');
+const mobileBridge = require('./src/services/mobile-bridge.service');
+const actionController = require('./src/services/action-controller.service');
 
 // Managers
 const windowManager = require("./src/managers/window.manager");
@@ -124,11 +124,18 @@ class ApplicationController {
     const ScreenshotQueue = require('./src/services/screenshot-queue');
     this.screenshots = new ScreenshotQueue(
       options => captureService.captureAndProcess(options),
-      count => windowManager.broadcastToAllWindows('screenshot-queue-changed', { count })
+      count => {
+        windowManager.broadcastToAllWindows('screenshot-queue-changed', { count });
+        conversationEvents.publish('queue.updated', { count });
+      }
     );
   // Default to Java so language is enforced from first run
   this.codingLanguage = "java";
     this.speechAvailable = false;
+    this.jobs = new Map();
+    this.streams = new Set();
+    this.selectedMobileDisplayId = null;
+    this.mobilePairing = null;
 
     // Utterance coalescing: VAD emits a transcript per natural pause, but a
     // single spoken question can still arrive as a few fragments (mid-thought
@@ -273,26 +280,34 @@ class ApplicationController {
       }
       const isFirstRun = status.needsOnboarding;
 
+      conversationStore.initialize(app.getPath('userData'));
+      captureService.initialize(conversationStore);
+      const savedDisplayId = Number(conversationStore.getMeta('selected_mobile_display_id'));
+      this.selectedMobileDisplayId = Number.isFinite(savedDisplayId) ? savedDisplayId : null;
+      mobileAuth.initialize(app.getPath('userData'));
+      this.configureActions();
       await windowManager.initializeWindows({ showMainWindow: !isFirstRun });
-      this.setupGlobalShortcuts();
-      windowsInput.start(windowManager, {
-        capture: () => this.queueScreenshot(),
-        submit: () => this.triggerScreenshotOCR(),
-        interact: () => windowManager.toggleInteraction(),
-        panels: () => windowManager.showAnswerWindows()
+      captureService.setOverlayCaptureScope(async work => {
+        const visible = ['main', 'llmResponse', 'codeResponse'].map(name => windowManager.getWindow(name)).filter(win => win && !win.isDestroyed() && win.isVisible());
+        try {
+          visible.forEach(win => win.hide());
+          if (visible.length) await new Promise(resolve => setTimeout(resolve, 150));
+          return await work();
+        } finally {
+          visible.forEach(win => { if (!win.isDestroyed()) win.showInactive(); });
+        }
       });
-      await vmControls.start(windowManager, {
-        capture: () => this.queueScreenshot(),
-        submit: () => this.triggerScreenshotOCR(),
-        interact: () => windowManager.toggleInteraction(),
-        panels: () => windowManager.showAnswerWindows()
-      });
+      mouseRouting.start(windowManager);
 
       // Initialize default stealth mode with terminal icon
       this.updateAppIcon("terminal");
 
       this.starting = false;
       this.isReady = true;
+      if ((!app.isPackaged && config.get('app.isDevelopment')) || process.env.MOBILE_CONTROL_ENABLED === 'true') {
+        try { await this.startMobileBridge(); }
+        catch (error) { logger.warn('Mobile bridge did not start', { error: error.message }); }
+      }
       if (!this.isFirstRun) windowManager.showAnswerWindows();
 
       // Launch the onboarding wizard if this is the first run.
@@ -360,15 +375,8 @@ class ApplicationController {
   }
 
   setupPermissions() {
-<<<<<<< HEAD
-    configureSystemAudioCapture(session.defaultSession);
-    session.defaultSession.setPermissionRequestHandler(
-      (webContents, permission, callback) => {
-        const allowedPermissions = ["microphone", "camera", "display-capture"];
-        const granted = allowedPermissions.includes(permission) ||
-          allowAudioCapturePermission(webContents.getURL(), permission);
-=======
     const appSession = session.defaultSession;
+    configureSystemAudioCapture(appSession);
     const isTrustedAppContents = (webContents) => {
       if (!webContents || webContents.isDestroyed()) {
         return false;
@@ -386,7 +394,6 @@ class ApplicationController {
         return false;
       }
     };
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
 
     // Electron exposes camera/microphone access as the single `media`
     // permission. The requested device type is provided separately in details.
@@ -408,7 +415,8 @@ class ApplicationController {
         if (isTrustedAppContents(webContents)) {
           if (permission === "media") {
             const mediaTypes = Array.isArray(details.mediaTypes) ? details.mediaTypes : [];
-            granted = mediaTypes.length === 0 || mediaTypes.includes("audio");
+            granted = mediaTypes.length === 0 || mediaTypes.includes("audio") ||
+              allowAudioCapturePermission(webContents.getURL(), permission);
           } else {
             granted = permission === "display-capture";
           }
@@ -424,37 +432,169 @@ class ApplicationController {
     );
   }
 
-  setupGlobalShortcuts() {
-    const shortcuts = {
-      "\\": () => this.queueScreenshot(),
-      "`": () => this.triggerScreenshotOCR(),
-      "CommandOrControl+Shift+S": () => this.queueScreenshot(),
-      "CommandOrControl+Shift+Enter": () => this.triggerScreenshotOCR(),
-      "CommandOrControl+Shift+O": () => windowManager.showAnswerWindows(),
-      "CommandOrControl+Shift+V": () => windowManager.toggleVisibility(),
-      "CommandOrControl+Shift+I": () => windowManager.toggleInteraction(),
-      "CommandOrControl+Shift+C": () => windowManager.switchToWindow("chat"),
-      "CommandOrControl+Shift+\\": () => this.clearSessionMemory(),
-      "CommandOrControl+,": () => windowManager.showSettings(),
-      "Alt+A": () => windowManager.toggleInteraction(),
-      "Alt+R": () => this.toggleSpeechRecognition(),
-      "CommandOrControl+Shift+T": () => windowManager.forceAlwaysOnTopForAllWindows(),
-      "CommandOrControl+Shift+Alt+T": () => {
-        const results = windowManager.testAlwaysOnTopForAllWindows();
-        logger.info('Always-on-top test triggered via shortcut', results);
+  configureActions() {
+    actionController.configure({
+      capture: async ({ sourceId } = {}) => {
+        const target = sourceId ? await captureService.selectTarget(sourceId) : undefined;
+        return this.queueScreenshot({ target });
       },
-      // Context-sensitive shortcuts based on interaction mode
-      "CommandOrControl+Up": () => this.handleUpArrow(),
-      "CommandOrControl+Down": () => this.handleDownArrow(),
-      "CommandOrControl+Left": () => this.handleLeftArrow(),
-      "CommandOrControl+Right": () => this.handleRightArrow(),
-    };
-
-    Object.entries(shortcuts).forEach(([accelerator, handler]) => {
-      const success = globalShortcut.register(accelerator, handler);
-      if (!success) logger.warn('Global shortcut unavailable', { accelerator });
-      else logger.debug("Global shortcut registered", { accelerator, success });
+      selectTarget: sourceId => captureService.selectTarget(sourceId),
+      setCrop: crop => captureService.setCrop(crop),
+      submit: () => {
+        if (!this.screenshots.images.length) throw Object.assign(new Error('No screenshots queued.'), { code: 'EMPTY_QUEUE' });
+        if ([...this.jobs.values()].some(job => job.type === 'screenshot' && job.status === 'processing')) throw Object.assign(new Error('A submission is already processing.'), { code: 'SUBMISSION_BUSY' });
+        return this.startJob('screenshot', () => this.triggerScreenshotOCR());
+      },
+      clearQueue: () => this.screenshots.clear(),
+      showAnswerPanels: () => { windowManager.showAnswerWindows(); return { success: true }; },
+      toggleOverlay: () => windowManager.toggleVisibility(),
+      toggleInteraction: () => windowManager.toggleInteraction(),
+      openChat: () => { windowManager.showChatWindow(); return { success: true }; },
+      openSettings: () => { windowManager.showSettings(); return { success: true }; },
+      toggleSpeech: () => this.toggleSpeechRecognition(),
+      selectSkill: skill => this.selectSkill(skill),
+      movePanels: direction => this.moveAnswerPanels(direction),
+      newConversation: () => this.startNewConversation(),
+      sendMessage: body => this.submitTextQuestion(body.content, {
+        source: 'chat', contextMode: body.contextMode || 'current',
+        attachmentMessageId: body.attachmentMessageId || null
+      }),
+      resendMessage: body => this.resendMessage(body.messageId, body.contextMode || 'current')
     });
+  }
+
+  async startMobileBridge() {
+    if (mobileBridge.getStatus().enabled) return mobileBridge.getStatus();
+    // Existing trusted phones already have a persisted token and reconnect on
+    // their own. Only create a code automatically for the very first phone.
+    this.mobilePairing = mobileAuth.listDevices().length ? null : mobileAuth.generatePairingCode();
+    const status = await mobileBridge.start({
+      host: process.env.MOBILE_CONTROL_HOST || undefined,
+      port: Number(process.env.MOBILE_CONTROL_PORT || 32190),
+      auth: mobileAuth,
+      store: conversationStore,
+      events: conversationEvents,
+      actions: actionController,
+      stateProvider: Object.assign(() => this.getMobileState(), { getJob: id => this.jobs.get(id) || null }),
+      autoConnect: false
+    });
+    conversationEvents.publish('status.updated', { mobile: status });
+    return status;
+  }
+
+  async stopMobileBridge() {
+    await mobileBridge.stop();
+    this.mobilePairing = null;
+  }
+
+  async getMobileState() {
+    const displayResult = captureService.listDisplays();
+    const windowStats = windowManager.getWindowStats();
+    return {
+      ready: this.isReady,
+      displays: displayResult.success ? displayResult.displays : [],
+      targets: await captureService.listTargets(),
+      selectedTarget: captureService.selected,
+      selectedDisplayId: this.selectedMobileDisplayId ?? screen.getPrimaryDisplay()?.id ?? null,
+      screenshotQueueCount: this.screenshots.images.length,
+      captureStatus: captureService.isProcessing ? 'capturing' : this.screenshots.submitting ? 'processing' : 'ready',
+      activeAIRequest: [...this.jobs.values()].some(job => job.status === 'processing'),
+      activeSkill: this.activeSkill,
+      speech: speechService.getStatus(),
+      windows: windowStats,
+      currentConversationId: conversationStore.currentConversationId,
+      eventSequence: conversationEvents.sequence
+    };
+  }
+
+  startJob(type, work) {
+    if (this.jobs.size > 200) {
+      for (const [jobId, existing] of this.jobs) {
+        if (existing.status !== 'processing') this.jobs.delete(jobId);
+        if (this.jobs.size <= 100) break;
+      }
+    }
+    const id = require('crypto').randomUUID();
+    const job = { id, type, status: 'processing', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    this.jobs.set(id, job);
+    conversationEvents.publish('job.started', job);
+    Promise.resolve().then(work).then(result => {
+      Object.assign(job, { status: result?.success === false ? 'failed' : 'completed', result, updatedAt: new Date().toISOString() });
+      conversationEvents.publish(job.status === 'completed' ? 'job.completed' : 'job.failed', job);
+    }).catch(error => {
+      Object.assign(job, { status: 'failed', error: error.message, updatedAt: new Date().toISOString() });
+      conversationEvents.publish('job.failed', job);
+    });
+    return job;
+  }
+
+  createStreamPersistence(assistantId) {
+    let pending = ''; let timer = null;
+    const flush = () => { if (pending && conversationStore.db) { conversationStore.appendAssistant(assistantId, pending); pending = ''; } timer = null; };
+    const recorder = {
+      delta: value => { pending += value; if (!timer) timer = setTimeout(flush, 250); },
+      finish: () => { if (timer) clearTimeout(timer); flush(); this.streams.delete(recorder); }
+    };
+    this.streams.add(recorder);
+    return recorder;
+  }
+
+  startNewConversation() {
+    sessionManager.clear();
+    const conversation = conversationStore.createConversation({ title: 'Conversation', skill: this.activeSkill });
+    conversationEvents.publish('conversation.created', conversation);
+    windowManager.broadcastToAllWindows('session-cleared');
+    return conversation;
+  }
+
+  selectSkill(skill) {
+    const allowed = ['dsa', 'programming'];
+    if (typeof skill !== 'string' || !skill.trim()) throw new Error('A skill is required.');
+    if (!allowed.includes(skill) && !require('./prompt-loader').promptLoader.getAvailableSkills().includes(skill)) throw new Error('Unknown skill.');
+    this.activeSkill = skill; sessionManager.setActiveSkill(skill);
+    windowManager.broadcastToAllWindows('skill-updated', { skill });
+    conversationEvents.publish('status.updated', { activeSkill: skill });
+    return { skill };
+  }
+
+  moveAnswerPanels(direction) {
+    const deltas = { up: [0, -20], down: [0, 20], left: [-20, 0], right: [20, 0] };
+    if (!deltas[direction]) throw new Error('Invalid panel direction.');
+    windowManager.moveBoundWindows(...deltas[direction]);
+    return { direction };
+  }
+
+  submitTextQuestion(text, { source = 'chat', contextMode = 'current', originalMessageId = null, attachmentMessageId = null } = {}) {
+    const content = String(text || '').trim();
+    if (!content) throw new Error('Question cannot be empty.');
+    if (attachmentMessageId) {
+      const original = conversationStore.getMessage(attachmentMessageId);
+      if (!original || original.role !== 'user') throw Object.assign(new Error('The screenshot question was not found.'), { statusCode: 404 });
+      const attachments = conversationStore.loadAttachments(original.id);
+      if (!attachments.length || attachments.some(item => !item.exists)) throw Object.assign(new Error('The saved screenshot context is unavailable.'), { statusCode: 410 });
+      const captures = attachments.map(item => ({ imageBuffer: fs.readFileSync(item.localPath), mimeType: item.mimeType, metadata: item.metadata }));
+      const turn = conversationStore.createTurn({ source: 'screenshot', content, skill: this.activeSkill, contextMode, originalMessageId: original.id });
+      conversationStore.addAttachments(turn.user.id, captures);
+      turn.user = conversationStore.getMessage(turn.user.id);
+      sessionManager.addUserInput(content, 'chat');
+      conversationEvents.publish('message.created', turn.user);
+      conversationEvents.publish('response.started', turn.assistant);
+      return this.startJob('screenshot-text', () => this.analyzeScreenshots(captures, { turn, contextMode, question: content }));
+    }
+    const turn = conversationStore.createTurn({ source, content, skill: this.activeSkill, contextMode, originalMessageId });
+    sessionManager.addUserInput(content, source === 'speech' ? 'speech' : 'chat');
+    conversationEvents.publish('message.created', turn.user);
+    conversationEvents.publish('response.started', turn.assistant);
+    return this.startJob('text', () => this.processWithLLM(content,
+      contextMode === 'fresh' ? { recent: [] } : sessionManager.getOptimizedHistory(), { turn }));
+  }
+
+  resendMessage(messageId, contextMode) {
+    if (!['current', 'fresh'].includes(contextMode)) throw new Error('Context mode must be current or fresh.');
+    const original = conversationStore.getMessage(messageId);
+    if (!original || original.role !== 'user') throw Object.assign(new Error('Original question was not found.'), { statusCode: 404 });
+    if (original.source !== 'screenshot') return this.submitTextQuestion(original.content, { source: 'resend', contextMode, originalMessageId: original.id });
+    return this.submitTextQuestion(original.content, { source: 'screenshot', contextMode, attachmentMessageId: original.id });
   }
 
   setupServiceEventHandlers() {
@@ -498,7 +638,7 @@ class ApplicationController {
   }
 
   setupIPCHandlers() {
-  ipcMain.handle("take-screenshot", () => this.queueScreenshot());
+  ipcMain.handle("take-screenshot", (_event, options) => this.queueScreenshot(options || {}));
   ipcMain.handle("submit-screenshots", () => this.triggerScreenshotOCR());
   ipcMain.handle("show-answer-windows", () => { windowManager.showAnswerWindows(); return { success: true }; });
   ipcMain.handle("get-screenshot-queue", () => ({ count: this.screenshots.images.length }));
@@ -673,18 +813,13 @@ class ApplicationController {
     });
 
     ipcMain.handle("send-chat-message", async (event, text) => {
-      // Add chat message to session memory
-      sessionManager.addUserInput(text, 'chat');
-      logger.debug('Chat message added to session memory', { textLength: text.length });
-
       // Typed messages need the full skill pipeline (with history context),
       // NOT the voice "intelligent filter" pipeline. Voice keeps its filter
       // behaviour; typed chat goes through processWithLLM so it gets real
       // answers using the active skill prompt and recent conversation history.
       (async () => {
         try {
-          const sessionHistory = sessionManager.getOptimizedHistory();
-          await this.processWithLLM(text, sessionHistory);
+          await this.submitTextQuestion(text, { source: 'chat' });
         } catch (error) {
           logger.error("Failed to process chat message with LLM", {
             error: error.message,
@@ -786,6 +921,38 @@ class ApplicationController {
 
     ipcMain.handle("get-settings", () => {
       return this.getSettings();
+    });
+
+    ipcMain.handle('get-mobile-connection', () => this.getMobileConnectionSettings());
+    ipcMain.handle('set-mobile-enabled', async (_event, enabled) => {
+      const value = !!enabled;
+      this.persistEnvUpdates({ MOBILE_CONTROL_ENABLED: String(value) });
+      try { if (value) await this.startMobileBridge(); else await this.stopMobileBridge(); }
+      catch (error) { this.persistEnvUpdates({ MOBILE_CONTROL_ENABLED: 'false' }); throw error; }
+      return this.getMobileConnectionSettings();
+    });
+    ipcMain.handle('regenerate-mobile-pairing', () => {
+      if (!mobileBridge.getStatus().enabled) throw new Error('Mobile control is disabled.');
+      this.mobilePairing = mobileAuth.generatePairingCode();
+      return this.getMobileConnectionSettings();
+    });
+    ipcMain.handle('set-mobile-interface', async (_event, host) => {
+      const available = mobileBridge.getLanAddresses().map(item => item.address);
+      if (!available.includes(host)) throw new Error('Selected LAN interface is unavailable.');
+      this.persistEnvUpdates({ MOBILE_CONTROL_HOST: host });
+      if (mobileBridge.getStatus().enabled) { await this.stopMobileBridge(); await this.startMobileBridge(); }
+      return this.getMobileConnectionSettings();
+    });
+    ipcMain.handle('revoke-mobile-device', (_event, deviceId) => {
+      mobileAuth.revoke(deviceId);
+      mobileBridge.disconnectDevice(deviceId);
+      return this.getMobileConnectionSettings();
+    });
+    ipcMain.handle('delete-conversation-history', () => {
+      const conversation = conversationStore.deleteAllHistory();
+      sessionManager.clear();
+      conversationEvents.publish('conversation.created', conversation);
+      return this.getMobileConnectionSettings();
     });
 
     ipcMain.handle("save-resume-context", async (_event, value) => {
@@ -970,9 +1137,6 @@ class ApplicationController {
         // Close all windows first
         windowManager.destroyAllWindows();
 
-        // Unregister shortcuts
-        globalShortcut.unregisterAll();
-
         // Force quit
         app.quit();
 
@@ -1011,7 +1175,6 @@ class ApplicationController {
       try {
         const { app } = require("electron");
         windowManager.destroyAllWindows();
-        globalShortcut.unregisterAll();
         app.quit();
         setTimeout(() => process.exit(0), 1000);
       } catch (error) {
@@ -1042,7 +1205,6 @@ class ApplicationController {
     } else {
       try {
         speechService.startRecording();
-        windowManager.showChatWindow();
         logger.info("Speech recognition started via global shortcut");
       } catch (error) {
         logger.error("Error starting speech recognition:", error);
@@ -1142,19 +1304,17 @@ class ApplicationController {
     windowManager.broadcastToAllWindows("skill-updated", { skill: newSkill });
   }
 
-  async queueScreenshot() {
+  async queueScreenshot(options = {}) {
     if (!this.isReady) return { success: false, error: 'Application is not ready.' };
     try {
       windowManager.broadcastToAllWindows('screenshot-status', { text: 'Capturing screenshot…' });
-      // Resolve now so rapid captures retain the monitor chosen at key press.
-      const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-      const count = await this.screenshots.add({ displayId: display.id });
-      windowManager.broadcastToAllWindows('screenshot-status', { text: `${count} screenshot(s) saved. Press backtick to send.`, count });
-      return { success: true, count };
+      const result = await this.screenshots.add(options);
+      windowManager.broadcastToAllWindows('screenshot-status', { text: `${result.count} screenshot(s) queued.`, count: result.count });
+      return { success: true, ...result };
     } catch (error) {
       windowManager.broadcastToAllWindows('screenshot-status', { text: error.message, error: true });
       this.broadcastOCRError(error.message);
-      return { success: false, error: error.message };
+      return { success: false, code: error.code || 'CAPTURE_FAILED', error: error.message };
     }
   }
 
@@ -1164,13 +1324,13 @@ class ApplicationController {
       return await this.screenshots.submit(batch => this.analyzeScreenshots(batch));
     } catch (error) {
       windowManager.broadcastToAllWindows('screenshot-status', { text: error.message, error: true });
-      windowManager.showLLMResponse(`Screenshot request failed: ${error.message}\n\nAny queued screenshots have been kept. Press backtick to retry.`);
+      windowManager.showLLMResponse(`Screenshot request failed: ${error.message}\n\nAny queued screenshots have been kept. Use Send to AI to retry.`);
       this.broadcastOCRError(error.message);
       return { success: false, error: error.message };
     }
   }
 
-  async analyzeScreenshots(captures) {
+  async analyzeScreenshots(captures, options = {}) {
     if (!this.isReady) {
       logger.warn("Screenshot requested before application ready");
       return;
@@ -1178,12 +1338,29 @@ class ApplicationController {
 
     const startTime = Date.now();
 
+    let turn = options.turn;
+    let stream;
+    let question = String(options.question || '').trim();
     try {
+      if (!turn) {
+        turn = conversationStore.createTurn({
+          source: 'screenshot',
+          content: `Screenshot request · ${captures.length} image${captures.length === 1 ? '' : 's'}`,
+          skill: this.activeSkill,
+          contextMode: options.contextMode || 'current'
+        });
+        conversationStore.addAttachments(turn.user.id, captures);
+        turn.user = conversationStore.getMessage(turn.user.id);
+        conversationEvents.publish('message.created', turn.user);
+        conversationEvents.publish('response.started', turn.assistant);
+      }
+      question = question || turn.user.content;
+      stream = this.createStreamPersistence(turn.assistant.id);
       windowManager.showLLMLoading();
       windowManager.broadcastToAllWindows('screenshot-status', { text: `Sending ${captures.length} screenshot(s) to ${llmService.imageModel}…` });
 
       // Use image directly with LLM and active skill; do not send chat messages here
-      const sessionHistory = sessionManager.getOptimizedHistory();
+      const sessionHistory = options.contextMode === 'fresh' ? { recent: [] } : sessionManager.getOptimizedHistory();
 
       const skillsRequiringProgrammingLanguage = ['dsa'];
       const needsProgrammingLanguage = skillsRequiringProgrammingLanguage.includes(this.activeSkill);
@@ -1202,12 +1379,19 @@ class ApplicationController {
         sessionHistory.recent,
         needsProgrammingLanguage ? this.codingLanguage : null,
         (delta) => {
+          stream.delta(delta);
+          conversationEvents.publish('response.delta', { messageId: turn.assistant.id, delta });
           windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
             messageId,
             delta
           });
-        }
+        },
+        question,
+        options.contextMode !== 'fresh'
       );
+      stream.finish();
+      conversationStore.completeAssistant(turn.assistant.id, llmResult.response, llmResult.metadata);
+      conversationEvents.publish('response.completed', conversationStore.getMessage(turn.assistant.id));
       llmResult.metadata = { ...llmResult.metadata, messageId };
       windowManager.broadcastToAllWindows('screenshot-status', { text: `Answered using ${captures.length} screenshot(s) · ${llmService.imageModel}` });
 
@@ -1217,6 +1401,7 @@ class ApplicationController {
         usedFallback: llmResult.metadata.usedFallback,
         isImageAnalysis: true
       });
+      sessionManager.addQATurn(question, llmResult.response);
 
       this.broadcastTranscriptionLLMResponse(llmResult);
 
@@ -1227,6 +1412,11 @@ class ApplicationController {
         isImageAnalysis: true
       });
     } catch (error) {
+      stream?.finish();
+      if (turn?.assistant?.id) {
+        conversationStore.failAssistant(turn.assistant.id, error.message);
+        conversationEvents.publish('response.failed', conversationStore.getMessage(turn.assistant.id));
+      }
       logger.error("Screenshot OCR process failed", {
         error: error.message,
         duration: Date.now() - startTime,
@@ -1247,10 +1437,17 @@ class ApplicationController {
     }
   }
 
-  async processWithLLM(text, sessionHistory) {
+  async processWithLLM(text, sessionHistory, options = {}) {
+    let turn = options.turn;
+    let stream;
     try {
-      // Add user input to session memory
-      sessionManager.addUserInput(text, 'llm_input');
+      if (!turn) {
+        turn = conversationStore.createTurn({ source: 'chat', content: text, skill: this.activeSkill });
+        sessionManager.addUserInput(text, 'chat');
+        conversationEvents.publish('message.created', turn.user);
+        conversationEvents.publish('response.started', turn.assistant);
+      }
+      stream = this.createStreamPersistence(turn.assistant.id);
 
       // Check if current skill needs programming language context
       const skillsRequiringProgrammingLanguage = ['dsa'];
@@ -1271,12 +1468,17 @@ class ApplicationController {
         sessionHistory.recent,
         needsProgrammingLanguage ? this.codingLanguage : null,
         (delta) => {
+          stream.delta(delta);
+          conversationEvents.publish('response.delta', { messageId: turn.assistant.id, delta });
           windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
             messageId,
             delta
           });
         }
       );
+      stream.finish();
+      conversationStore.completeAssistant(turn.assistant.id, llmResult.response, llmResult.metadata);
+      conversationEvents.publish('response.completed', conversationStore.getMessage(turn.assistant.id));
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
       logger.info("LLM processing completed, showing response", {
@@ -1306,6 +1508,11 @@ class ApplicationController {
         usedFallback: llmResult.metadata.usedFallback,
       });
     } catch (error) {
+      stream?.finish();
+      if (turn?.assistant?.id) {
+        conversationStore.failAssistant(turn.assistant.id, error.message);
+        conversationEvents.publish('response.failed', conversationStore.getMessage(turn.assistant.id));
+      }
       logger.error("LLM processing failed", {
         error: error.message,
         skill: this.activeSkill,
@@ -1323,6 +1530,7 @@ class ApplicationController {
       });
 
       this.broadcastLLMError(error.message);
+      throw error;
     }
   }
 
@@ -1411,6 +1619,8 @@ class ApplicationController {
     // bubble the streaming start event created; otherwise a total failure
     // leaves an empty streamed bubble stranded next to the fallback message.
     let messageId = null;
+    let turn = null;
+    let stream = null;
     try {
       // Validate input text
       if (!text || typeof text !== 'string' || text.trim().length === 0) {
@@ -1428,6 +1638,11 @@ class ApplicationController {
         });
         return;
       }
+
+      turn = conversationStore.createTurn({ source: 'speech', content: cleanText, skill: this.activeSkill, contextMode: 'current' });
+      conversationEvents.publish('message.created', turn.user);
+      conversationEvents.publish('response.started', turn.assistant);
+      stream = this.createStreamPersistence(turn.assistant.id);
 
       logger.info("Processing transcription with intelligent LLM response", {
         skill: this.activeSkill,
@@ -1458,12 +1673,17 @@ class ApplicationController {
         sessionHistory.recent,
         needsProgrammingLanguage ? this.codingLanguage : null,
         (delta) => {
+          stream.delta(delta);
+          conversationEvents.publish('response.delta', { messageId: turn.assistant.id, delta });
           this.sendToVoiceResponseWindows("transcription-llm-response-chunk", {
             messageId,
             delta
           });
         }
       );
+      stream.finish();
+      conversationStore.completeAssistant(turn.assistant.id, llmResult.response, llmResult.metadata);
+      conversationEvents.publish('response.completed', conversationStore.getMessage(turn.assistant.id));
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
       sessionManager.addQATurn(cleanText, llmResult.response);
@@ -1476,32 +1696,23 @@ class ApplicationController {
         isTranscriptionResponse: true
       });
 
-<<<<<<< HEAD
       // Send response to chat windows
       this.broadcastTranscriptionLLMResponse(llmResult);
 
       // Also display in the overlay (LLM response) window so the answer
       // appears in both the chat panel and the floating overlay, mirroring
       // the behaviour of screenshot/image responses.
-      windowManager.showLLMResponse(llmResult.response, {
-        question: cleanText,
-        messageId,
-        skill: this.activeSkill,
-        processingTime: llmResult.metadata.processingTime,
-        usedFallback: llmResult.metadata.usedFallback,
-        isTranscriptionResponse: true
-      });
-=======
       this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
       if (this.shouldShowVoiceOverlay()) {
         windowManager.showLLMResponse(llmResult.response, {
+          question: cleanText,
+          messageId,
           skill: this.activeSkill,
           processingTime: llmResult.metadata.processingTime,
           usedFallback: llmResult.metadata.usedFallback,
           isTranscriptionResponse: true
         });
       }
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
 
       logger.info("Transcription LLM response completed", {
         responseLength: llmResult.response.length,
@@ -1511,6 +1722,7 @@ class ApplicationController {
       });
 
     } catch (error) {
+      stream?.finish();
       logger.error("Transcription LLM processing failed", {
         error: error.message,
         errorStack: error.stack,
@@ -1525,6 +1737,10 @@ class ApplicationController {
         // bubble instead of leaving it stuck and appending a duplicate.
         if (messageId) {
           fallbackResult.metadata = { ...fallbackResult.metadata, messageId };
+        }
+        if (turn?.assistant?.id) {
+          conversationStore.completeAssistant(turn.assistant.id, fallbackResult.response, { ...fallbackResult.metadata, fallbackReason: error.message });
+          conversationEvents.publish('response.completed', conversationStore.getMessage(turn.assistant.id));
         }
 
         sessionManager.addModelResponse(fallbackResult.response, {
@@ -1550,6 +1766,10 @@ class ApplicationController {
         });
         
       } catch (fallbackError) {
+        if (turn?.assistant?.id) {
+          conversationStore.failAssistant(turn.assistant.id, `${error.message}; fallback failed: ${fallbackError.message}`);
+          conversationEvents.publish('response.failed', conversationStore.getMessage(turn.assistant.id));
+        }
         logger.error("Fallback response also failed", {
           fallbackError: fallbackError.message
         });
@@ -1626,7 +1846,6 @@ class ApplicationController {
   sendToChatWindow(channel, data) {
     const chatWindow = windowManager.getWindow("chat");
     if (!chatWindow || chatWindow.isDestroyed()) {
-      logger.warn("Chat window unavailable for speech event", { channel });
       return;
     }
     chatWindow.webContents.send(channel, data);
@@ -1693,9 +1912,10 @@ class ApplicationController {
   }
 
   onWillQuit() {
-    vmControls.stop();
-    windowsInput.stop();
-    globalShortcut.unregisterAll();
+    mobileBridge.stop().catch(() => {});
+    mouseRouting.stop();
+    for (const stream of [...this.streams]) stream.finish();
+    conversationStore.close();
     speechService.shutdown();
     windowManager.destroyAllWindows();
 
@@ -1743,11 +1963,24 @@ class ApplicationController {
       whisperResponseTarget: process.env.WHISPER_RESPONSE_TARGET || "both",
       whisperSegmentMs: process.env.WHISPER_SEGMENT_MS || "4000",
       geminiKey: process.env.OPENAI_API_KEY || "",
+      mobileConnection: this.getMobileConnectionSettings(),
       resumeText: resumeContext.load().text || "",
       resumeStatus: resumeContext.getStatus(),
 
       azureConfigured: !!process.env.AZURE_SPEECH_KEY && !!process.env.AZURE_SPEECH_REGION,
       speechAvailable: this.speechAvailable
+    };
+  }
+
+  getMobileConnectionSettings() {
+    return {
+      ...mobileBridge.getStatus(),
+      enabled: mobileBridge.getStatus().enabled,
+      configuredEnabled: process.env.MOBILE_CONTROL_ENABLED === 'true',
+      configuredHost: process.env.MOBILE_CONTROL_HOST || null,
+      pairing: this.mobilePairing,
+      devices: mobileAuth.listDevices ? mobileAuth.listDevices() : [],
+      storage: conversationStore.db ? { ...conversationStore.getStatus(), usage: conversationStore.getStorageUsage() } : null
     };
   }
 

@@ -675,7 +675,7 @@
                 console.error('[LLM-RESPONSE] electronAPI not available!');
             }
             hideLoadingState();
-            displayResponse({ content: isCodePanel ? 'Code will appear here. Clicks pass through; hover and scroll to read. Ctrl+Shift+I enables moving and copying.' : 'Press backslash to save screenshots, then backtick to send them. Clicks pass through; hover and scroll to read. Ctrl+Shift+I enables moving and copying.' });
+            displayResponse({ content: isCodePanel ? 'Code will appear here. Clicks pass through; hover and scroll to read.' : 'Use the desktop toolbar or phone remote to queue and send screenshots. Clicks pass through; hover and scroll to read.' });
             setupScrolling();
         } // end initLLMResponseWindow
 

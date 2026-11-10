@@ -737,10 +737,6 @@ class SpeechService extends EventEmitter {
     this.emit('recording-started');
     this.emit('status', 'Local Whisper recording started');
 
-<<<<<<< HEAD
-    // Windows captures system playback in the renderer. macOS retains its
-    // existing renderer microphone path; Linux uses the native recorder.
-=======
     if (this.whisperWorker.isConfigured()) {
       this.whisperWorker.warmup({
         model: this._getWhisperModel(),
@@ -764,8 +760,8 @@ class SpeechService extends EventEmitter {
     // needs; macOS would otherwise require a Homebrew `sox` install (not bundled)
     // and a child-process mic that the system TCC prompt can't attribute. The
     // renderer path uses getUserMedia, which macOS prompts for cleanly via the
-    // app's NSMicrophoneUsageDescription. Linux keeps the native recorder path.
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
+    // app's NSMicrophoneUsageDescription. Windows' renderer is configured by
+    // system-audio.js to capture system playback; Linux keeps native capture.
     this.useRendererCapture = process.platform === 'win32' || process.platform === 'darwin';
     if (this.useRendererCapture) {
       this.emit('status', process.platform === 'win32'
@@ -1253,12 +1249,8 @@ class SpeechService extends EventEmitter {
     return {
       provider: this.provider,
       isRecording: this.isRecording,
-<<<<<<< HEAD
-      isInitialized: this.provider === 'openai' ? this.available : this.provider === 'azure' ? !!this.speechConfig : !!this.whisperCommand,
-=======
       isProcessingAudio: this.isProcessingAudio,
-      isInitialized: this.provider === 'azure' ? !!this.speechConfig : !!this.whisperCommand,
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
+      isInitialized: this.provider === 'openai' ? this.available : this.provider === 'azure' ? !!this.speechConfig : !!this.whisperCommand,
       sessionDuration: this.sessionStartTime ? Date.now() - this.sessionStartTime : 0,
       retryCount: this.retryCount,
       effectiveSettings: {

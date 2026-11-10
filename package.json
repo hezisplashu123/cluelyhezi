@@ -4,8 +4,13 @@
   "description": "AI Problem Solving Assistant",
   "main": "main.js",
   "scripts": {
-    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
-    "dev": "env -u ELECTRON_RUN_AS_NODE electron . --no-sandbox --disable-gpu",
+    "start": "node scripts/start-electron.cjs",
+    "dev": "node scripts/start-electron.cjs --no-sandbox --disable-gpu",
+    "mobile": "npm --prefix mobile start",
+    "test-mobile-services": "node scripts/test-mobile-services.cjs",
+    "capture-diagnostic": "node scripts/start-electron.cjs --script scripts/check-screen-capture.cjs",
+    "test-mobile-main": "node scripts/start-electron.cjs --script scripts/test-mobile-main.cjs",
+    "test": "node scripts/test-screenshot-queue.cjs && node scripts/test-resume-context.cjs && node scripts/test-audio-routing.cjs && node scripts/test-web-primitives.cjs && node scripts/test-mobile-services.cjs",
     "test-speech": "node scripts/test-speech.js",
     "test-resume-context": "node scripts/test-resume-context.cjs",
     "build": "electron-builder",
@@ -15,7 +20,7 @@
     "build:all": "electron-builder --mac --win --linux",
     "dist": "npm run build",
     "pack": "electron-builder --dir",
-    "clean": "rm -rf dist/",
+    "clean": "node scripts/clean.cjs",
     "rebuild": "npm run clean && npm run build",
     "release": "npm run clean && npm run build:all",
     "postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps"
@@ -62,25 +67,20 @@
       "!.env*",
       "!.venv-whisper/**/*",
       "!.whisper-models/**/*",
-<<<<<<< HEAD
       "!eng.traineddata",
-      "!artifacts/**/*"
-=======
+      "!artifacts/**/*",
+      "!mobile/**/*",
       "!bin/**/*",
       "!scripts/__pycache__/**/*",
-      "!**/*.pyc",
-      "!eng.traineddata"
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
+      "!**/*.pyc"
     ],
     "asarUnpack": [
       "assests/icons/**/*",
       "prompts/**/*",
-<<<<<<< HEAD
       "scripts/transcribe-whisper.py",
-      "scripts/windows-input.ps1"
-=======
-      "scripts/whisper_worker.py"
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
+      "scripts/whisper_worker.py",
+      "scripts/mouse-routing.ps1",
+      "scripts/capture-window-metadata.ps1"
     ],
     "mac": {
       "category": "public.app-category.utilities",
@@ -110,6 +110,7 @@
       }
     },
     "win": {
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",

@@ -424,7 +424,7 @@ class MainWindowUI {
         if (window.electronAPI) {
             const updateScreenshotCount = (data) => {
                 const label = document.getElementById('screenshotCount');
-                if (label) label.textContent = `\\ ${data.count}`;
+                if (label) label.textContent = String(data.count);
             };
             window.electronAPI.onScreenshotQueueChanged((_event, data) => updateScreenshotCount(data));
             window.electronAPI.onScreenshotStatus((_event, data) => {
@@ -437,6 +437,7 @@ class MainWindowUI {
                 window.electronAPI.submitScreenshots();
             });
             document.getElementById('answerWindowsButton')?.addEventListener('click', () => window.electronAPI.showAnswerWindows());
+            document.getElementById('settingsButton')?.addEventListener('click', () => window.electronAPI.showSettings());
             // Fix interaction mode change listener
             window.electronAPI.onInteractionModeChanged((event, interactive) => {
                 logger.debug('Interaction mode changed received:', interactive);
@@ -484,7 +485,6 @@ class MainWindowUI {
                 this.loadSpeechAvailability();
             });
             
-            // Alt+R is handled once by the main-process global shortcut.
         }
         
         // Also listen via the api interface for backup
@@ -516,11 +516,6 @@ class MainWindowUI {
             logger.error('window.api not available - event listeners not set up!');
         }
         
-        // Keyboard shortcuts
-        this.setupKeyboardShortcuts();
-        
-        // Settings shortcut
-        this.setupSettingsShortcut();
     }
 
     handleLLMResponse(data) {
@@ -550,39 +545,6 @@ class MainWindowUI {
         logger.error('LLM error received', {
             component: 'MainWindowUI',
             error: data.error
-        });
-    }
-
-    setupKeyboardShortcuts() {
-        document.addEventListener('keydown', (e) => {
-            if (e.metaKey && e.key === '\\') {
-                this.isHidden = !this.isHidden;
-                if (this.isHidden) {
-                    this.showHiddenIndicator();
-                }
-            }
-            
-            // Handle Cmd + Arrow keys based on interaction mode
-            if (e.metaKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-                e.preventDefault();
-
-                if (this.isInteractive) {
-                    // Interactive mode: Cmd + Up/Down for skill navigation
-                    if (e.key === 'ArrowUp') {
-                        this.navigateSkill(-1); // Previous skill
-                    } else if (e.key === 'ArrowDown') {
-                        this.navigateSkill(1); // Next skill
-                    } else {
-                    }
-                    // Left/Right arrows do nothing in interactive mode
-                } else {
-                    // Non-interactive mode: Cmd + Arrow keys for window movement
-                    this.moveWindow(e.key);
-                }
-            }
-            
-            // Alt+A is handled globally by the main process
-            // No need to handle it here since it needs to work even when windows are non-interactive
         });
     }
 
@@ -653,7 +615,7 @@ class MainWindowUI {
         this.isRecording = true;
         if (this.micButton) {
             this.micButton.classList.add('recording');
-            this.micButton.title = 'Listening to computer audio - click to pause (Alt+R)';
+            this.micButton.title = 'Listening to computer audio - click to pause';
         }
         // Windows captures playback for both providers; macOS retains its
         // existing renderer capture. Linux uses the native recorder.
@@ -671,7 +633,7 @@ class MainWindowUI {
         this.isRecording = false;
         if (this.micButton) {
             this.micButton.classList.remove('recording');
-            this.micButton.title = 'Computer audio paused - click to resume (Alt+R)';
+            this.micButton.title = 'Computer audio paused - click to resume';
         }
         this._stopRendererAudioCapture();
         logger.debug('Recording stopped', { component: 'MainWindowUI' });
@@ -1176,17 +1138,6 @@ class MainWindowUI {
                 error: error.message
             });
         }
-    }
-
-    setupSettingsShortcut() {
-        document.addEventListener('keydown', (e) => {
-            // Cmd+, or Ctrl+, for settings
-            if ((e.metaKey || e.ctrlKey) && e.key === ',') {
-                logger.debug('Settings keyboard shortcut pressed');
-                e.preventDefault();
-                this.openSettings();
-            }
-        });
     }
 
     openSettings() {

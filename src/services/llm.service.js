@@ -116,7 +116,7 @@ class LLMService {
    * @param {string|null} programmingLanguage - optional language context for skills that need it
    * @returns {Promise<{response: string, metadata: object}>}
    */
-  async processImageWithSkill(imageBuffer, mimeType, activeSkill, sessionMemory = [], programmingLanguage = null) {
+  async processImageWithSkill(imageBuffer, mimeType, activeSkill, sessionMemory = [], programmingLanguage = null, userQuestion = null, includeConversationContext = true) {
     if (!this.isInitialized) {
       throw new Error('LLM service not initialized. Check OpenAI API key configuration.');
     }
@@ -136,15 +136,7 @@ class LLMService {
       // Build request with text + image parts
       const request = {
         model: this.imageModel,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: this.formatImageInstruction(activeSkill, programmingLanguage) },
-              ...this.imageParts(imageBuffer, mimeType)
-            ]
-          }
-        ]
+        contents: this.buildImageContents(imageBuffer, mimeType, activeSkill, programmingLanguage, userQuestion, includeConversationContext)
       };
 
       this.applyGenerationDefaults(request, { maxOutputTokens: 8192 });
@@ -219,7 +211,7 @@ class LLMService {
     }
   }
 
-  async processImageWithSkillStream(imageBuffer, mimeType, activeSkill, sessionMemory = [], programmingLanguage = null, onDelta = null) {
+  async processImageWithSkillStream(imageBuffer, mimeType, activeSkill, sessionMemory = [], programmingLanguage = null, onDelta = null, userQuestion = null, includeConversationContext = true) {
     if (!this.isInitialized) {
       throw new Error('LLM service not initialized. Check OpenAI API key configuration.');
     }
@@ -236,15 +228,7 @@ class LLMService {
       const skillPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
       const geminiRequest = {
         model: this.imageModel,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: this.formatImageInstruction(activeSkill, programmingLanguage) },
-              ...this.imageParts(imageBuffer, mimeType)
-            ]
-          }
-        ]
+        contents: this.buildImageContents(imageBuffer, mimeType, activeSkill, programmingLanguage, userQuestion, includeConversationContext)
       };
       this.applyGenerationDefaults(geminiRequest, { maxOutputTokens: 8192 });
       if (skillPrompt && skillPrompt.trim().length > 0) {
@@ -288,7 +272,7 @@ class LLMService {
         error: error.message,
         requestId: this.requestCount
       });
-      return this.processImageWithSkill(imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage);
+      return this.processImageWithSkill(imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage, userQuestion, includeConversationContext);
     }
   }
 
@@ -307,6 +291,20 @@ class LLMService {
   formatImageInstruction(activeSkill, programmingLanguage) {
     const langNote = programmingLanguage ? ` Use only ${programmingLanguage.toUpperCase()} for any code.` : '';
     return `Read all screenshots in capture order as context for the same task. Combine problem statements, constraints, examples, and code across screenshots. Solve the visible question or task; for coding problems give an explanation, complexity, and final code. If essential content is unreadable or missing, say what is needed instead of guessing.${langNote}`;
+  }
+
+  buildImageContents(imageBuffer, mimeType, activeSkill, programmingLanguage, userQuestion, includeConversationContext = true) {
+    const sessionManager = require('../managers/session.manager');
+    const history = includeConversationContext && typeof sessionManager.getQAHistory === 'function'
+      ? sessionManager.getQAHistory()
+          .filter(item => item.content && typeof item.content === 'string')
+          .map(item => ({ role: item.role === 'model' ? 'model' : 'user', parts: [{ text: item.content.trim() }] }))
+      : [];
+    const question = String(userQuestion || '').trim();
+    const instruction = question
+      ? `${this.formatImageInstruction(activeSkill, programmingLanguage)}\n\nUser question: ${question}`
+      : this.formatImageInstruction(activeSkill, programmingLanguage);
+    return [...history, { role: 'user', parts: [{ text: instruction }, ...this.imageParts(imageBuffer, mimeType)] }];
   }
 
   async processTextWithSkill(text, activeSkill, sessionMemory = [], programmingLanguage = null) {

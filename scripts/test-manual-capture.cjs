@@ -6,7 +6,6 @@ const timeout = setTimeout(() => app.exit(1), 20000);
 app.whenReady().then(async () => {
   const manager = require('../src/managers/window.manager');
   const capture = require('../src/services/capture.service');
-  const input = require('../src/services/windows-input.service');
   let analyzed = 0;
   let resolveAnalyze;
   const submitted = new Promise(resolve => { resolveAnalyze = resolve; });
@@ -17,14 +16,14 @@ app.whenReady().then(async () => {
     ipcMain.handle('get-screenshot-queue', () => ({ count: queue.images.length }));
     ipcMain.handle('get-speech-availability', () => false);
     ipcMain.handle('resize-window', () => ({ success: true }));
-    ipcMain.handle('take-screenshot', async () => ({ success: true, count: await queue.add({ displayId: screen.getPrimaryDisplay().id }) }));
+    ipcMain.handle('take-screenshot', async () => ({ success: true, ...await queue.add({ displayId: screen.getPrimaryDisplay().id }) }));
     ipcMain.handle('submit-screenshots', () => queue.submit(async images => { analyzed = images.length; resolveAnalyze(); }));
     const toolbar = await manager.createWindow('main');
     manager.windows.set('main', toolbar);
     toolbar.show();
     manager.setInteractive(false);
-    assert.equal(input.releaseVMInput, undefined, 'Automatic Ctrl+Alt injection removed');
     await toolbar.webContents.executeJavaScript("new Promise(resolve => setTimeout(resolve, 150))");
+    assert.equal(await toolbar.webContents.executeJavaScript("!document.getElementById('chatButton') && !!document.getElementById('settingsButton')"), true, 'Desktop chat button is absent and settings is present');
     // Even a late/stale click-through event may not disable camera or submit.
     toolbar.webContents.send('interaction-mode-changed', false);
     const captureDone = new Promise(resolve => {
@@ -34,7 +33,7 @@ app.whenReady().then(async () => {
     await captureDone;
     assert.ok(queue.images.every(image => image.imageBuffer.length > 1000), 'Both captures contain real host pixels');
     await toolbar.webContents.executeJavaScript("new Promise(resolve => setTimeout(resolve, 50))");
-    assert.equal(await toolbar.webContents.executeJavaScript("document.getElementById('screenshotCount').textContent"), '\\ 2');
+    assert.equal(await toolbar.webContents.executeJavaScript("document.getElementById('screenshotCount').textContent"), '2');
     await toolbar.webContents.executeJavaScript("document.getElementById('submitScreenshots').click()");
     await submitted;
     assert.equal(analyzed, 2, 'Submit forwards both captured images');

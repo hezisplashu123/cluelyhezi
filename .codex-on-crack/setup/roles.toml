@@ -1,0 +1,8 @@
+schema_version = 1
+
+[roles.builder]
+model = "gpt-6.1-terra"
+effort = "high"
+writes = true
+tasks = ["implementation", "tests"]
+brief = "Implements the scoped task and verifies it for lead review."

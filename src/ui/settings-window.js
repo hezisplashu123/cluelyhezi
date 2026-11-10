@@ -31,6 +31,27 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('window.api not available');
         return;
     }
+    const mobileStatus = document.getElementById('mobileConnectionStatus');
+    const renderMobile = status => {
+        if (!status.address) {
+            mobileStatus.textContent = 'Phone control is disabled.';
+            return;
+        }
+        const paired = status.devices?.length || 0;
+        const connected = status.connectedDevices?.length || 0;
+        const connection = connected
+            ? `${connected} phone${connected === 1 ? '' : 's'} connected automatically.`
+            : paired
+                ? `${paired} trusted phone${paired === 1 ? '' : 's'} will reconnect automatically.`
+                : 'No phone has been paired yet.';
+        const pairing = status.pairing?.code ? ` One-time pairing code: ${status.pairing.code}` : '';
+        mobileStatus.textContent = `Desktop address: ${status.address}. ${connection}${pairing}`;
+    };
+    const mobileAction = async action => { try { renderMobile(await action()); } catch (error) { mobileStatus.textContent = error.message; } };
+    document.getElementById('mobileEnable').addEventListener('click', () => mobileAction(() => window.electronAPI.setMobileEnabled(true)));
+    document.getElementById('mobileDisable').addEventListener('click', () => mobileAction(() => window.electronAPI.setMobileEnabled(false)));
+    document.getElementById('mobilePair').addEventListener('click', () => mobileAction(() => window.electronAPI.regenerateMobilePairing()));
+    mobileAction(() => window.electronAPI.getMobileConnection());
 
     // Request current settings when window opens
     const requestCurrentSettings = () => {

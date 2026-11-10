@@ -34,15 +34,10 @@ It is free and open source. Processing stays on your machine, and the only thing
 
 - **Invisible overlay.** Windows stay out of Zoom, Google Meet, Microsoft Teams, Discord, and OBS captures. You see the answer, the call does not.
 - **Hidden during screen share.** When a share starts, the app can hide every window on its own.
-<<<<<<< HEAD
 - **Real-time voice.** Speech is split on natural pauses instead of a fixed timer, so one spoken question stays one question. Filler phrases that Whisper invents on silence are dropped before they reach the model.
-- **Streamed answers.** Replies appear word by word as the model generates them, in both the chat and the floating window.
-- **Direct image analysis.** Screenshots go straight to OpenAI for visual reasoning, with no slow OCR step in between.
-=======
-- **Flexible local voice.** Choose manual start/stop capture or automatic voice-activity detection without fixed-timer sentence cuts.
 - **Configurable streamed answers.** Route voice replies to chat, the floating overlay, or both.
-- **Direct image analysis.** Screenshots go straight to Gemini for visual reasoning, with no slow OCR step in between.
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
+- **Direct image analysis.** Screenshots go straight to OpenAI for visual reasoning, with no slow OCR step in between.
+- **Flexible local voice.** Choose manual start/stop capture or automatic voice-activity detection without fixed-timer sentence cuts.
 - **Session memory.** The whole conversation is remembered, so follow-ups, edge cases, and optimizations keep their context.
 - **Resume-aware answers.** Paste your resume experience into Settings to ground typed, spoken, and screenshot answers in your actual background.
 - **Language aware.** Tailored answers for C++, C, Python, Java, and JavaScript.
@@ -68,7 +63,7 @@ The website at [opencluely.techycsr.dev](https://opencluely.techycsr.dev) detect
 ## Quick start
 
 On Windows, listening starts automatically when the app opens and continues
-while it runs in the background. The speaker button or **Alt+R** pauses or
+while it runs in the background. The speaker button pauses or
 resumes listening. Capture automatically reconnects after stream interruptions.
 It captures computer
 playback, including the other person's call audio, across audio outputs. It
@@ -168,72 +163,112 @@ For Azure Speech, create a Speech resource in the [Azure Portal](https://portal.
 
 ## How it works
 
-<<<<<<< HEAD
-1. **Ask.** Speak the question or press the screenshot shortcut. The microphone listens for natural pauses on its own and does not cut you off mid sentence.
+1. **Ask.** Speak a question using automatic pause detection or manual capture, or capture a screenshot from the desktop controls.
 2. **Reason.** OpenAI reads the audio or image with full conversation context and works toward a precise answer.
-3. **Answer.** The response streams into the overlay in real time, with formatted text and highlighted code.
-=======
-1. **Ask.** Use automatic pause detection, choose manual start/stop capture in Settings, or use the screenshot shortcut.
-2. **Reason.** Gemini reads the audio or image with full conversation context and works toward a precise answer.
 3. **Answer.** Voice responses stream to chat, the overlay, or both, according to Settings.
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
 
-## Keyboard shortcuts
+## Desktop and phone controls
 
-Answers appear centered below the toolbar. Fenced code opens in its own Code
-window, with a draggable title bar, resizable edges, scrolling, and Copy buttons.
-Moving or resizing Code keeps your placement across subsequent answers. Use the
-toolbar's windows icon or `Ctrl/Cmd + Shift + O` to reopen both panels.
-Panels have grey tinted backgrounds and pass clicks through by default. Hover and
-use the wheel to scroll. `Ctrl/Cmd + Shift + I` enables moving, resizing, and
-copying; press it again to restore click-through. Closing a panel hides it.
-Left-click over a panel to let subsequent wheel scrolling reach the screen
-behind it. Moving off that panel and hovering again restores panel scrolling.
+Application commands are buttons, not global keyboard hooks. The desktop toolbar
+provides capture, send, speech, answer-panel, skill, language and settings controls.
+The phone focuses on capture, submission, previews and conversation history. The
+separate desktop transcription/chat panel is no longer created.
 
-Coding responses (from screenshots, text, or speech) stay entirely in the right
-Code panel, including their approach and complexity. The Question & Answer panel
-keeps non-coding answers. Each source line has a green explanation above it;
-The app maps purpose-focused spoken descriptions onto the original source by
-line number, using a separate structured model response. Description formatting
-or service failures retain the original solution instead of failing the screenshot.
-Copy removes presentation annotations and copies runnable source. Panels use a
-grey tint with a thin white outline and retain click-through scrolling.
+Queue each screenshot with **Capture Screenshot**, then press **Send to AI** to
+analyze the complete batch. Failed requests restore the batch for retry. The
+in-memory queue is limited to 20 images or 150 MB. Desktop and phone use the same
+persisted target. If exactly one VMware Workstation or Player window is found it
+is selected automatically; use phone Settings to select among multiple windows,
+or explicitly select a host monitor. The mouse position does not affect capture.
 
-Press backslash once for each screenshot you want to include (for example, scroll
-through a problem and capture each part). The camera counter shows the queue size.
-Press backtick to analyze the whole batch; failed requests keep the images for
-retry. Captures stay in memory until submitted or the app exits (up to 20 images,
-150 MB total). Screenshot answers use `gpt-5.4-mini` (`OPENAI_IMAGE_MODEL`); text and
-voice keep using `gpt-5-nano` (`OPENAI_MODEL`).
+For a VM, restore the VMware application window before capture. Window capture may
+include VMware menus and borders; minimized windows and some protected or black
+frames are not reliably capturable. A failed window capture is reported instead of
+silently switching monitors. In phone Settings, optional crop percentages can trim
+the window; capture again to preview the result. When window capture fails, Windows
+can retry from the containing monitor only if VMware is verified, foreground,
+unobscured, entirely on one display, and a viewport crop has been configured.
+Automatic viewport detection is not currently implemented. A guest-side agent would be a separate integration
+and may be needed for reliable minimized-guest capture. VM audio must play through
+the host playback device to reach computer-audio capture.
 
-For a VM, run OpenCluely on the host and keep the VM visible on the monitor under
-your pointer. This captures the visible VM screen without a guest installation;
-covered or minimized content is not visible. VMware can swallow host keyboard
-hooks while it owns input. For controls inside a Windows guest, keep the host
-app running, run `scripts/build-vm-controls.ps1`, and copy the generated
-`artifacts/yashpc1.zip` into the VM. Extract it and run
-`yashpc1.exe`; leave the paired JSON beside it. Its window and tray label are
-also yashpc1. Exit any old VM helper before launching it. Wait for
-Connected, then use the same capture, submit, and panel shortcuts inside the VM.
-The helper forwards only those reserved actions and panel wheel events over the
-VMware NAT/host-only network. It contains no OpenAI API key. Without the helper,
-press Ctrl+Alt and release both keys to ungrab VMware, then press backslash
-to capture or backtick to submit. The host toolbar
-camera and send buttons also work without a guest helper. Capture and submit
-do not synthesize keyboard events. The screenshot
-is taken locally from the visible host screen. A bare key swallowed by the guest
-cannot trigger that host-side release. Zoom audio in the VM
-must play through the host's playback device to reach computer-audio capture.
+### Mobile bridge architecture
 
-| Action | Shortcut | Description |
-|---|---|---|
-| Queue screenshot | Backslash (`\`) or `Cmd/Ctrl + Shift + S` | Add a screenshot from the monitor under the pointer |
-| Analyze screenshots | Backtick (`` ` ``) or `Cmd/Ctrl + Shift + Enter` | Send all queued screenshots together for one answer |
-| Toggle speech | `Alt + R` | Start or stop voice recognition, if configured |
-| Toggle visibility | `Cmd/Ctrl + Shift + V` | Show or hide all windows |
-| Toggle interaction | `Cmd/Ctrl + Shift + I` or `Alt + A` | Enable or disable click through |
-| Open chat | `Cmd/Ctrl + Shift + C` | Open the interactive chat window |
-| Settings | `Cmd/Ctrl + ,` | Open the settings panel |
+The Electron main process owns capture, speech, model requests, presentation, and
+history. Its private-LAN bridge exposes a small authenticated `/api/v1` HTTP API
+and an authenticated WebSocket at `/api/v1/events`. The phone sends commands and
+renders canonical events; SQLite remains authoritative. Permanent device tokens
+are never placed in URLs, and the OpenAI key is never returned by the bridge.
+
+Enable phone control in desktop Settings, then enter the displayed private LAN
+address and six-digit pairing code in the Expo app. Pairing codes expire after
+five minutes; device credentials are stored in the phone's SecureStore and can be
+revoked by the desktop API. The LAN transport uses HTTP, so use a trusted local
+network. The bridge binds to one private interface and is not internet-facing by
+default. Restart the bridge or generate a new code if the pairing code expires.
+
+For a local diagnostic, `npm.cmd run capture-diagnostic` lists the available
+VMware and monitor targets without sending images to a model. To save a diagnostic
+frame, run `npm.cmd run capture-diagnostic -- --save <new-file.png>` with one
+VMware window open; inspect and delete the file when finished. A specific source
+can be selected with `--source <source-id>`.
+For a diagnostic-only viewport crop in PowerShell, set
+`$env:OPENCLUELY_DIAGNOSTIC_CROP = '0,0,1,1'` before running the command; values
+are normalized x,y,width,height from 0 to 1. Remove the environment variable
+afterward with `Remove-Item Env:OPENCLUELY_DIAGNOSTIC_CROP`. It does not change
+the saved app target.
+
+History is stored under Electron's OS-managed `userData` directory:
+
+```text
+<userData>/conversations/history.sqlite
+<userData>/conversations/captures/<attachment-id>.png
+```
+
+SQLite uses foreign keys, WAL journaling, and schema migrations. `conversations`
+stores durable threads; `messages` stores linked user/assistant turns, status,
+source, skill, context mode, and errors; `attachments` stores private file paths,
+sizes, and SHA-256 hashes; `idempotency` prevents retry duplicates. Short-term model
+context remains bounded separately from permanent history.
+
+### Run on Windows and Expo Go
+
+```powershell
+npm.cmd install
+npm.cmd start
+
+cd mobile
+npm.cmd install
+npx.cmd expo start --lan
+```
+
+Verification commands:
+
+```powershell
+npm.cmd test
+npm.cmd run pack
+npm.cmd run typecheck --prefix mobile
+npx.cmd expo-doctor@latest mobile
+
+Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+& .\node_modules\.bin\electron.cmd scripts/test-answer-panels.cjs
+& .\node_modules\.bin\electron.cmd scripts/test-continuous-audio.cjs
+& .\node_modules\.bin\electron.cmd scripts/test-manual-capture.cjs
+& .\node_modules\.bin\electron.cmd scripts/test-mobile-main.cjs
+```
+
+1. Start OpenCluely from the repository with `npm.cmd start`.
+2. Put the phone and computer on the same private network.
+3. In `mobile/`, run `npx.cmd expo start --lan` and scan the QR code with Expo Go.
+4. The phone connects automatically; no desktop setting, address, or code is needed.
+5. Select a monitor, capture one or more screenshots, and press **Send to AI**.
+6. Confirm the streamed answer appears on both devices.
+7. Restart both applications and confirm the server reloads saved history.
+
+Expo's development-server tunnel does not tunnel this desktop API. Same-LAN access
+is required. If Windows Firewall prompts, allow Node/Electron only on **Private
+networks**. Otherwise add a private-network inbound TCP rule for port `32190`; do
+not expose it on Public profiles or configure router port forwarding.
 
 ## Project status
 
@@ -243,20 +278,15 @@ OpenCluely is under active development. The core is stable and improvements ship
 
 - Stealth overlay with a draggable command bar and a click through toggle
 - Hidden during screen share, with automatic hiding when a share begins
-<<<<<<< HEAD
 - Screenshot capture with direct OpenAI analysis, no OCR step
 - Real-time voice input that segments on natural pauses, not a blind timer
 - Utterance coalescing so one spoken question becomes one answer
-- Streamed answers that render word by word in the chat and the overlay
-=======
-- Screenshot capture with direct Gemini analysis, no OCR step
 - Configurable manual or VAD-driven voice capture
 - Persistent local Whisper worker with optional CUDA acceleration and idle GPU release
 - Configurable chat/overlay routing for streamed voice answers
->>>>>>> 0a9da75135f5aade3a067d86a7c8bb73f372f014
 - Whisper hallucination filter that drops phantom phrases on silence
 - AI response window with markdown and syntax highlighting
-- Global shortcuts for capture, visibility, interaction, chat, and settings
+- Desktop and authenticated Expo Go controls for capture, visibility, interaction, chat, and settings
 - Session memory and a full chat UI
 - Language picker and a DSA skill prompt
 - Optional Azure Speech and local Whisper, with an auto hiding mic button

@@ -48,6 +48,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hideSettings: () => ipcRenderer.invoke('hide-settings'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+  getMobileConnection: () => ipcRenderer.invoke('get-mobile-connection'),
+  setMobileEnabled: (enabled) => ipcRenderer.invoke('set-mobile-enabled', enabled),
+  regenerateMobilePairing: () => ipcRenderer.invoke('regenerate-mobile-pairing'),
+  setMobileInterface: (host) => ipcRenderer.invoke('set-mobile-interface', host),
+  revokeMobileDevice: (deviceId) => ipcRenderer.invoke('revoke-mobile-device', deviceId),
+  deleteConversationHistory: () => ipcRenderer.invoke('delete-conversation-history'),
   saveResumeContext: (text) => ipcRenderer.invoke('save-resume-context', text),
 
   // First-run onboarding

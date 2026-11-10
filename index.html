@@ -357,23 +357,27 @@
   </head>
   <body>
     <div class="command-tab">
-      <button type="button" class="command-item" id="captureScreenshot" title="After releasing VMware with Ctrl+Alt, press backslash or click here to capture.">
+      <button type="button" class="command-item" id="captureScreenshot" title="Capture the selected VMware window or monitor.">
         <i class="fas fa-camera"></i>
-        <span id="screenshotCount">\ 0</span>
+        <span id="screenshotCount">0</span>
       </button>
       <div class="command-separator"></div>
-      <button type="button" class="command-item" id="submitScreenshots" title="After releasing VMware with Ctrl+Alt, press backtick or click here to submit.">
+      <button type="button" class="command-item" id="submitScreenshots" title="Send all queued screenshots to AI.">
         <i class="fas fa-paper-plane"></i>
-        <span>`</span>
+        <span>Send</span>
       </button>
       <div class="command-separator"></div>
-      <div class="command-item" id="micButton" title="Listen to computer audio (Alt+R)" aria-label="Toggle computer audio listening">
+      <div class="command-item" id="micButton" title="Toggle computer audio listening" aria-label="Toggle computer audio listening">
         <i class="fas fa-volume-high"></i>
       </div>
       <div class="command-separator"></div>
-      <div class="command-item" id="answerWindowsButton" title="Open answer and code windows (Ctrl+Shift+O)">
+      <div class="command-item" id="answerWindowsButton" title="Open answer and code windows">
         <i class="fas fa-window-restore"></i>
       </div>
+      <div class="command-separator"></div>
+      <button type="button" class="command-item" id="settingsButton" title="Open desktop settings">
+        <i class="fas fa-gear"></i>
+      </button>
       <div class="command-separator"></div>
       <div class="command-item" id="skillIndicator">
         <i class="fas fa-brain"></i>
@@ -391,84 +395,42 @@
         </select>
       </div>
       <div class="command-separator"></div>
-      <div class="command-item" id="infoButton" title="Shortcuts">
+      <div class="command-item" id="infoButton" title="Controls">
         <i class="fas fa-circle-info"></i>
       </div>
       <div class="command-separator"></div>
       <div class="status-dot non-interactive" id="statusDot"></div>
     </div>
 
-  <!-- Shortcuts Popover (hidden by default via CSS) -->
+  <!-- Controls Popover (hidden by default via CSS) -->
   <div id="shortcutsPopover" class="shortcuts-popover">
       <div class="shortcuts-title">
-        <i class="fas fa-bolt"></i> Global Shortcuts
+        <i class="fas fa-mobile-alt"></i> Controls
       </div>
       <table class="shortcuts-table">
         <thead>
           <tr>
-            <th style="width: 45%">Shortcut</th>
+            <th style="width: 45%">Control</th>
             <th>Action</th>
           </tr>
         </thead>
         <tbody>
           <tr>
             <td>
-              <span class="kbd">Ctrl/Cmd</span>
-              + <span class="kbd">Shift</span>
-              + <span class="kbd">S</span>
+              Desktop camera / Phone Capture
             </td>
-            <td>Queue screenshot (also \)</td>
+            <td>Queue a screenshot</td>
           </tr>
           <tr>
-            <td><span class="kbd">`</span> / Ctrl+Shift+Enter</td>
+            <td>Desktop Send / Phone Send</td>
             <td>Analyze all queued screenshots</td>
           </tr>
-          <tr><td>Ctrl/Cmd+Shift+O</td><td>Open answer and code windows</td></tr>
-          <tr>
-            <td>
-              <span class="kbd">Ctrl/Cmd</span>
-              + <span class="kbd">Shift</span>
-              + <span class="kbd">V</span>
-            </td>
-            <td>Toggle visibility</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="kbd">Ctrl/Cmd</span>
-              + <span class="kbd">Shift</span>
-              + <span class="kbd">I</span>
-              <span style="opacity:.7; margin:0 4px;">or</span>
-              <span class="kbd">Alt</span>
-              + <span class="kbd">A</span>
-            </td>
-            <td>Toggle interaction (click-through)</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="kbd">Ctrl/Cmd</span>
-              + <span class="kbd">Shift</span>
-              + <span class="kbd">C</span>
-            </td>
-            <td>Open chat</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="kbd">Alt</span>
-              + <span class="kbd">R</span>
-            </td>
-            <td>Toggle speech</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="kbd">Ctrl/Cmd</span>
-              + <span class="kbd">,</span>
-            </td>
-            <td>Open settings</td>
-          </tr>
+          <tr><td>Desktop speaker</td><td>Toggle speech</td></tr>
+          <tr><td>Phone Settings</td><td>Select the capture target</td></tr>
         </tbody>
       </table>
       <div class="shortcuts-footer">
-        <span>Tip: Alt+A also toggles interaction from anywhere.</span>
+        <span>Use phone Settings to choose VMware or a monitor.</span>
         <a href="https://techycsr.dev" target="_blank" rel="noreferrer noopener">Made by @TechyCSR</a>
       </div>
     </div>
