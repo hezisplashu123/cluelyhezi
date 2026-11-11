@@ -7,7 +7,7 @@ class ActionController {
       capture: () => this.handlers.capture({ sourceId: body.sourceId }),
       selectTarget: () => this.handlers.selectTarget(body.sourceId),
       setCrop: () => this.handlers.setCrop(body.crop),
-      submit: () => this.handlers.submit(),
+      submit: () => this.handlers.submit(body),
       clearQueue: () => this.handlers.clearQueue(),
       showAnswerPanels: () => this.handlers.showAnswerPanels(),
       toggleOverlay: () => this.handlers.toggleOverlay(),
@@ -18,8 +18,13 @@ class ActionController {
       selectSkill: () => this.handlers.selectSkill(body.skill),
       movePanels: () => this.handlers.movePanels(body.direction),
       newConversation: () => this.handlers.newConversation(),
+      selectConversation: () => this.handlers.selectConversation(body.conversationId),
+      audioSource: () => this.handlers.audioSource(body.source),
+      computerMicrophone: () => this.handlers.computerMicrophone(body.enabled),
       sendMessage: () => this.handlers.sendMessage(body),
       resendMessage: () => this.handlers.resendMessage(body)
+      ,voiceFilter: () => this.handlers.voiceFilter(!!body.enabled)
+      ,deleteVoiceProfile: () => this.handlers.deleteVoiceProfile()
     };
     if (!Object.prototype.hasOwnProperty.call(allowed, action)) {
       throw Object.assign(new Error('Unknown action.'), { statusCode: 404 });

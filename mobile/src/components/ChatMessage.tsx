@@ -3,8 +3,8 @@ import type { Message } from '../types/protocol';
 
 export function ChatMessage({ message, onPress }: { message: Message; onPress?: () => void }) {
   const user = message.role === 'user';
-  const content = message.content || (message.status === 'failed' ? message.error : 'Thinking…') || '';
-  const label = user ? (message.source === 'speech' ? 'TRANSCRIBED QUESTION' : 'YOU') : 'OPENCLUELY';
+  const content = message.content || (message.status === 'failed' ? message.error : message.status === 'interrupted' ? 'Response interrupted. Ask again to retry.' : 'Thinking…') || '';
+  const label = user ? (message.source === 'speech' || message.source === 'mobile_voice' ? 'SPOKEN QUESTION' : 'YOU') : 'OPENCLUELY';
   return <Pressable disabled={!user || !onPress} onPress={onPress} style={[s.wrap, user ? s.user : s.ai]}>
     <Text style={s.meta}>{label} · {new Date(message.createdAt).toLocaleTimeString()}</Text>
     {!!message.attachmentCount && <Text style={s.attachment}>{message.attachmentCount} saved screenshot{message.attachmentCount === 1 ? '' : 's'} · tap to reuse</Text>}
@@ -12,6 +12,8 @@ export function ChatMessage({ message, onPress }: { message: Message; onPress?: 
       ? <Text key={index} selectable style={s.code}>{part.replace(/^```[^\n]*\n?/, '').replace(/```$/, '')}</Text>
       : <Text key={index} selectable style={s.body}>{part}</Text>)}
     {message.status === 'streaming' && <View style={s.caret} />}
+    {message.status === 'failed' && !!message.content && <Text style={s.attachment}>Answer failed: {message.error || 'Unknown error'}</Text>}
+    {message.status === 'interrupted' && !!message.content && <Text style={s.attachment}>Response interrupted.</Text>}
   </Pressable>;
 }
 

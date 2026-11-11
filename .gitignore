@@ -14,3 +14,7 @@ mobile/.expo/
 *.sqlite-shm
 *.sqlite-wal
 conversations/
+voice-recognition/
+speaker-models/
+speaker-python/
+*.voiceprofile

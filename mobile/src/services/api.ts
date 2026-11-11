@@ -1,4 +1,4 @@
-import type { DesktopConfig, DesktopState, Message } from '../types/protocol';
+import type { DesktopConfig, DesktopState, Message, VoiceRecognitionStatus } from '../types/protocol';
 
 export class DesktopApiError extends Error {
   constructor(message: string, public status: number, public code?: string) {
@@ -17,7 +17,7 @@ async function request<T>(config: DesktopConfig | null, path: string, init: Requ
       throw new DesktopApiError(body.error?.message || `Desktop returned ${response.status}.`, response.status, body.error?.code);
     }
     return body.data as T;
-  } catch (error: any) { if (error?.name === 'AbortError') throw new Error('Desktop did not respond. Check Wi-Fi and the LAN address.'); throw error; }
+  } catch (error: any) { if (error?.name === 'AbortError') throw new Error('The result is unknown. Check the conversation before retrying; the same request will be reused.'); throw error; }
   finally { clearTimeout(timer); }
 }
 
@@ -29,7 +29,8 @@ export const api = {
     return body.data;
   },
   state: (c: DesktopConfig) => request<DesktopState>(c, '/api/v1/state'),
-  conversations: (c: DesktopConfig) => request<any>(c, '/api/v1/conversations'),
+  voiceStatus: (c: DesktopConfig) => request<VoiceRecognitionStatus>(c, '/api/v1/voice-profile'),
+  conversations: (c: DesktopConfig, cursor?: string) => request<any>(c, `/api/v1/conversations?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
   messages: (c: DesktopConfig, id: string, cursor?: string) => request<{items: Message[]; nextCursor: string | null}>(c, `/api/v1/conversations/${id}/messages?limit=40${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
   post: (c: DesktopConfig, path: string, value: any = {}) => request<any>(c, path, { method: 'POST', body: JSON.stringify({ requestId: `${Date.now()}-${Math.random().toString(36).slice(2)}`, ...value }) })
 };

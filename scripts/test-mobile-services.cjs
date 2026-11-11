@@ -43,6 +43,7 @@ test('conversation streaming persists one turn, reloads, paginates, and preserve
   store.close();
   store.initialize(root);
   assert.equal(store.getMessage(turn.assistant.id).content, 'Linear time');
+  assert.equal(store.listConversations().items.find(item => item.id === firstConversation).preview, 'What is O(n)?');
   store.close();
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -70,7 +71,9 @@ test('mobile bridge rejects unauthenticated requests and authenticates HTTP and 
   let captureCount = 0; let resendCount = 0; let requestedSource;
   actions.configure({ capture: async ({ sourceId }) => { requestedSource = sourceId; await new Promise(resolve => setTimeout(resolve, 30)); return { success: true, id: 'shot-1', count: ++captureCount }; }, resendMessage: async () => { await new Promise(resolve => setTimeout(resolve, 30)); return { sequence: ++resendCount }; } });
   const port = 33000 + Math.floor(Math.random() * 10000);
-  await bridge.start({ host: address, port, auth, store, events, actions, stateProvider: Object.assign(async () => ({ ready: true, displays: [] }), { getJob: () => null }), autoConnect: false });
+  const speech = new (require('events').EventEmitter)();
+  Object.assign(speech, { isRecording: false, isAvailable: () => true, startRecording({ source }) { this.captureSource = source; this.isRecording = true; this.emit('recording-started'); }, stopRecording() { this.isRecording = false; }, ingestMobilePcm(data) { this.bytes = (this.bytes || 0) + data.length; } });
+  await bridge.start({ host: address, port, auth, store, events, actions, speech, stateProvider: Object.assign(async () => ({ ready: true, displays: [] }), { getJob: () => null }), autoConnect: false });
   const base = `http://${address}:${port}`;
   const denied = await fetch(`${base}/api/v1/state`);
   assert.equal(denied.status, 401);
@@ -99,8 +102,17 @@ test('mobile bridge rejects unauthenticated requests and authenticates HTTP and 
   const otherResend = await resend(second.token); assert.equal(otherResend.data.sequence, 2); assert.equal(resendCount, 2);
   await new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://${address}:${port}/api/v1/events`);
+    ws.on('open', () => ws.send(JSON.stringify({ type: 'audio.start', sessionId: 'session-123' })));
+    ws.on('close', code => { try { assert.equal(code, 4001); assert.equal(speech.isRecording, false); resolve(); } catch (error) { reject(error); } });
+    ws.on('error', reject);
+  });
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://${address}:${port}/api/v1/events`);
     ws.on('open', () => ws.send(JSON.stringify({ type: 'authenticate', token: paired.token, lastSequence: events.sequence })));
-    ws.on('message', raw => { const value = JSON.parse(raw); if (value.type === 'authenticated') { ws.close(); resolve(); } });
+    ws.on('message', raw => { const value = JSON.parse(raw); if (value.type === 'authenticated') ws.send(JSON.stringify({ type: 'audio.start', sessionId: 'session-123', encoding: 'pcm_s16le', sampleRate: 16000, channels: 1 }));
+      if (value.type === 'audio.status' && value.status === 'listening') { ws.send(JSON.stringify({ type: 'audio.chunk', sessionId: 'session-123', sequence: 1, pcm: Buffer.alloc(320, 1).toString('base64') })); ws.send(JSON.stringify({ type: 'audio.stop', sessionId: 'session-123' })); }
+      if (value.type === 'audio.status' && value.status === 'stopped') { try { assert.ok(speech.bytes > 0); assert.equal(speech.isRecording, false); ws.close(); resolve(); } catch (error) { reject(error); } }
+      if (value.type === 'audio.error') reject(new Error(value.message)); });
     ws.on('error', reject);
   });
   auth.revoke(paired.device.id);

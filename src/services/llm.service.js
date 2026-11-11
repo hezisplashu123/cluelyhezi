@@ -131,12 +131,12 @@ class LLMService {
     try {
       // Build system instruction using the skill prompt (with optional language injection)
       const { promptLoader } = require('../../prompt-loader');
-      const skillPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
+      const skillPrompt = activeSkill === 'general_qa' ? 'You are a helpful general question-and-answer assistant. Answer clearly and concisely, and use conversation context for follow-ups.' : (promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '');
 
       // Build request with text + image parts
       const request = {
         model: this.imageModel,
-        contents: this.buildImageContents(imageBuffer, mimeType, activeSkill, programmingLanguage, userQuestion, includeConversationContext)
+        contents: this.buildImageContents(imageBuffer, mimeType, activeSkill, programmingLanguage, userQuestion, includeConversationContext, sessionMemory)
       };
 
       this.applyGenerationDefaults(request, { maxOutputTokens: 8192 });
@@ -225,10 +225,10 @@ class LLMService {
 
     try {
       const { promptLoader } = require('../../prompt-loader');
-      const skillPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
+      const skillPrompt = activeSkill === 'general_qa' ? 'You are a helpful general question-and-answer assistant. Answer clearly and concisely, and use conversation context for follow-ups.' : (promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '');
       const geminiRequest = {
         model: this.imageModel,
-        contents: this.buildImageContents(imageBuffer, mimeType, activeSkill, programmingLanguage, userQuestion, includeConversationContext)
+        contents: this.buildImageContents(imageBuffer, mimeType, activeSkill, programmingLanguage, userQuestion, includeConversationContext, sessionMemory)
       };
       this.applyGenerationDefaults(geminiRequest, { maxOutputTokens: 8192 });
       if (skillPrompt && skillPrompt.trim().length > 0) {
@@ -268,6 +268,7 @@ class LLMService {
         }
       };
     } catch (error) {
+      if (activeSkill === 'general_qa') throw error;
       logger.warn('Streaming image analysis failed, falling back to non-streaming', {
         error: error.message,
         requestId: this.requestCount
@@ -289,14 +290,15 @@ class LLMService {
   }
 
   formatImageInstruction(activeSkill, programmingLanguage) {
+    if (activeSkill === 'general_qa') return 'Read the screenshots in order and answer the user’s question clearly and concisely. Ask for missing or unreadable information rather than guessing.';
     const langNote = programmingLanguage ? ` Use only ${programmingLanguage.toUpperCase()} for any code.` : '';
     return `Read all screenshots in capture order as context for the same task. Combine problem statements, constraints, examples, and code across screenshots. Solve the visible question or task; for coding problems give an explanation, complexity, and final code. If essential content is unreadable or missing, say what is needed instead of guessing.${langNote}`;
   }
 
-  buildImageContents(imageBuffer, mimeType, activeSkill, programmingLanguage, userQuestion, includeConversationContext = true) {
+  buildImageContents(imageBuffer, mimeType, activeSkill, programmingLanguage, userQuestion, includeConversationContext = true, sessionMemory = []) {
     const sessionManager = require('../managers/session.manager');
     const history = includeConversationContext && typeof sessionManager.getQAHistory === 'function'
-      ? sessionManager.getQAHistory()
+      ? (activeSkill === 'general_qa' ? sessionMemory : sessionManager.getQAHistory())
           .filter(item => item.content && typeof item.content === 'string')
           .map(item => ({ role: item.role === 'model' ? 'model' : 'user', parts: [{ text: item.content.trim() }] }))
       : [];
@@ -434,6 +436,7 @@ class LLMService {
         }
       };
     } catch (error) {
+      if (activeSkill === 'general_qa') throw error;
       logger.warn('Streaming text failed, falling back to non-streaming', {
         error: error.message,
         requestId: this.requestCount
@@ -558,6 +561,15 @@ class LLMService {
   }
 
   buildPromptRequest(text, activeSkill, sessionMemory, programmingLanguage) {
+    if (activeSkill === 'general_qa') {
+      const history = sessionMemory.filter(item => item.content && typeof item.content === 'string');
+      const request = { systemInstruction: { parts: [{ text: 'You are a helpful general question-and-answer assistant. Answer clearly and concisely, use prior conversation for follow-ups, and provide code only when requested or relevant.' }] }, contents: [
+        ...history.map(item => ({ role: item.role === 'model' ? 'model' : 'user', parts: [{ text: item.content.trim() }] })),
+        { role: 'user', parts: [{ text: text.trim() }] }
+      ] };
+      this.applyGenerationDefaults(request);
+      return request;
+    }
     // Check if we have the new conversation history format
     const sessionManager = require('../managers/session.manager');
     

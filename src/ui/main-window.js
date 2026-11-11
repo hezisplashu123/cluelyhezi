@@ -15,9 +15,11 @@ class MainWindowUI {
         this.skillIndicator = null;
         this.micButton = null;
         this.isRecording = false;
+        this.captureSource = 'desktop';
         this.speechAvailable = false; // track availability
         this._popoverHideTimeout = null;
-        // Renderer-side audio capture state (Windows captures playback only).
+        // Renderer-side audio capture state. Windows uses either system
+        // playback or the physical input microphone, based on captureSource.
         this._audioContext = null;
         this._mediaStream = null;
         this._scriptNode = null;
@@ -444,8 +446,8 @@ class MainWindowUI {
                 this.handleInteractionModeChanged(interactive);
             });
 
-            window.electronAPI.onRecordingStarted(() => {
-                this.handleRecordingStarted();
+            window.electronAPI.onRecordingStarted((_event, data) => {
+                this.handleRecordingStarted(data && data.source);
             });
 
             window.electronAPI.onRecordingStopped(() => {
@@ -610,12 +612,15 @@ class MainWindowUI {
         logger.debug('Screenshot request received', { component: 'MainWindowUI' });
     }
 
-    handleRecordingStarted() {
+    handleRecordingStarted(source = 'desktop') {
         if (this.isRecording) return;
         this.isRecording = true;
+        this.captureSource = source || 'desktop';
         if (this.micButton) {
             this.micButton.classList.add('recording');
-            this.micButton.title = 'Listening to computer audio - click to pause';
+            this.micButton.title = this.captureSource === 'microphone'
+                ? 'Listening to the computer microphone - click to pause'
+                : 'Listening to computer audio - click to pause';
         }
         // Windows captures playback for both providers; macOS retains its
         // existing renderer capture. Linux uses the native recorder.
@@ -624,7 +629,7 @@ class MainWindowUI {
             navigator.platform || '')).toLowerCase();
         const useRendererCapture = platform.includes('win') || platform.includes('mac');
         if (useRendererCapture) {
-            this._startRendererAudioCapture();
+        this._startRendererAudioCapture(this.captureSource);
         }
         logger.debug('Recording started', { component: 'MainWindowUI' });
     }
@@ -639,17 +644,14 @@ class MainWindowUI {
         logger.debug('Recording stopped', { component: 'MainWindowUI' });
     }
 
-    /**
-     * Capture Windows playback without opening a microphone. Other platforms
-     * retain their existing input capture behavior.
-     */
-    async _startRendererAudioCapture() {
+    /** Capture the selected desktop source and normalize it to 16 kHz PCM. */
+    async _startRendererAudioCapture(captureSource = this.captureSource) {
         this._stopRendererAudioCapture();
         const generation = this._captureGeneration;
         try {
             const platform = ((navigator.userAgentData && navigator.userAgentData.platform) ||
                 navigator.platform || '').toLowerCase();
-            const systemAudio = platform.includes('win');
+            const systemAudio = platform.includes('win') && captureSource !== 'microphone';
             const stream = systemAudio
                 ? await navigator.mediaDevices.getDisplayMedia({
                     audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
@@ -693,7 +695,7 @@ class MainWindowUI {
                 throw new Error('Speech capture requires a 16000 Hz audio context.');
             }
 
-            const source = audioContext.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
+            const mediaSource = audioContext.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
             const bufferSize = 1024;
             const scriptNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
             this._scriptNode = scriptNode;
@@ -713,7 +715,7 @@ class MainWindowUI {
                 window.electronAPI.sendAudioChunk(pcm16.buffer);
             };
 
-            source.connect(scriptNode);
+            mediaSource.connect(scriptNode);
             // Keep processing active without replaying captured audio into the
             // speakers, which would feed it back into system loopback.
             const silentGain = audioContext.createGain();
@@ -747,7 +749,7 @@ class MainWindowUI {
         // Keep the speech session and its buffered audio; reopen only capture.
         this._captureRetryTimer = setTimeout(() => {
             this._captureRetryTimer = null;
-            if (this.isRecording) this._startRendererAudioCapture();
+                    if (this.isRecording) this._startRendererAudioCapture(this.captureSource);
         }, 2000);
     }
 

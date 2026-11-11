@@ -169,6 +169,11 @@ For Azure Speech, create a Speech resource in the [Azure Portal](https://portal.
 
 ## Desktop and phone controls
 
+Use `npm.cmd run desktop` for the Windows desktop only, `npm.cmd run phone`
+for the Expo development server only, or `npm.cmd run desktop:phone` to launch
+both together. Enabling phone control always displays a fresh five-minute
+pairing code in desktop Settings; already paired phones may reconnect without it.
+
 Application commands are buttons, not global keyboard hooks. The desktop toolbar
 provides capture, send, speech, answer-panel, skill, language and settings controls.
 The phone focuses on capture, submission, previews and conversation history. The
@@ -203,9 +208,19 @@ are never placed in URLs, and the OpenAI key is never returned by the bridge.
 Enable phone control in desktop Settings, then enter the displayed private LAN
 address and six-digit pairing code in the Expo app. Pairing codes expire after
 five minutes; device credentials are stored in the phone's SecureStore and can be
-revoked by the desktop API. The LAN transport uses HTTP, so use a trusted local
-network. The bridge binds to one private interface and is not internet-facing by
-default. Restart the bridge or generate a new code if the pairing code expires.
+revoked in desktop Settings. Pairing codes and bearer credentials travel over
+unencrypted HTTP and WebSocket on the LAN; use only a trusted private network.
+Authenticated TLS is required before using untrusted or remote networks. The
+bridge binds to one private interface; do not configure router port forwarding.
+Restart the bridge or generate a new code if the pairing code expires.
+
+The phone is an audio-free receiver. **Start Computer Microphone** remotely
+starts the paired computer's physical input microphone; no phone microphone
+permission is requested and no phone audio is sent over the network. Interim
+transcripts, finalized questions, and streamed answers travel back over the
+authenticated event socket and are persisted in desktop history. The desktop
+speech provider permits only one capture source at a time, so starting the
+computer microphone cleanly replaces any active desktop playback capture.
 
 For a local diagnostic, `npm.cmd run capture-diagnostic` lists the available
 VMware and monitor targets without sending images to a model. To save a diagnostic
@@ -260,10 +275,13 @@ Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 1. Start OpenCluely from the repository with `npm.cmd start`.
 2. Put the phone and computer on the same private network.
 3. In `mobile/`, run `npx.cmd expo start --lan` and scan the QR code with Expo Go.
-4. The phone connects automatically; no desktop setting, address, or code is needed.
-5. Select a monitor, capture one or more screenshots, and press **Send to AI**.
-6. Confirm the streamed answer appears on both devices.
-7. Restart both applications and confirm the server reloads saved history.
+4. Enable phone connections in desktop Settings and pair with its displayed
+   LAN address and six-digit code. Later launches reuse the saved credential.
+5. Tap **Start Computer Microphone** and speak near the computer. The phone does
+   not request microphone permission. Tap **Stop Computer Microphone** when done.
+6. Confirm that the question and streamed answer appear, then send a typed
+   follow-up. Screenshots are available as a secondary action.
+7. Restart both applications and confirm that history remains available.
 
 Expo's development-server tunnel does not tunnel this desktop API. Same-LAN access
 is required. If Windows Firewall prompts, allow Node/Electron only on **Private
@@ -354,3 +372,88 @@ Released under the MIT License. See [LICENSE](LICENSE) for details.
 Built by [TechyCSR](https://techycsr.dev). If OpenCluely helped you, consider giving it a star ⭐
 
 </div>
+# Removed: phone microphone flow
+
+The mobile app no longer records audio or requests microphone permission. The
+following design notes are retained only as an archived implementation record.
+
+<!-- Legacy phone-microphone design (disabled and not exposed by the app).
+
+YashOpenClue can enroll a consenting user's voice on the phone and use a local
+speaker-verification gate to ignore probable matches before phone audio reaches
+transcription or an LLM. The feature protects the **phone microphone path only**;
+desktop microphone and system-audio capture are separate sources.
+
+Speaker verification is probabilistic. A strict threshold reduces the chance
+that the enrolled speaker is passed through, but can also block another person.
+`UNCERTAIN`, invalid audio, missing-profile, timeout, and model-failure results
+are fail-closed while the filter is enabled. If guaranteed exclusion is needed,
+do not capture that microphone source.
+
+## Install the pinned local model
+
+The app does not silently download a speaker model. From PowerShell, run:
+
+```powershell
+.\scripts\setup-speaker-model.ps1 -UserData "$env:APPDATA\OpenCluely"
+```
+
+The script creates an isolated Python environment and explicitly downloads
+SpeechBrain 1.0.3 plus `speechbrain/spkrec-ecapa-voxceleb` at revision
+`0f99f2d0ebe89ac095bcc5903c4dd8f72b367286`. Copy the two paths printed by the
+script into the desktop `.env`:
+
+```dotenv
+SPEAKER_PYTHON=C:\path\to\speaker-python\Scripts\python.exe
+SPEAKER_MODEL_DIR=C:\path\to\spkrec-ecapa-voxceleb-0f99f2d
+```
+
+The model expects 16 kHz mono audio. Inference runs in a bounded, timeout-
+protected Python subprocess, not Electron's main event loop.
+
+## Secure phone transport
+
+Enrollment, testing, and filtered phone listening are refused over plain LAN
+HTTP. Install a certificate trusted by both the desktop and phone (for example,
+with a locally managed CA), then configure:
+
+```dotenv
+MOBILE_TLS_CERT=C:\path\to\desktop-lan.crt
+MOBILE_TLS_KEY=C:\path\to\desktop-lan.key
+```
+
+Restart the desktop and pair using the displayed `https://` address. Credentials
+remain in the Authorization header and are never placed in URLs.
+
+## Use and data handling
+
+Open mobile **Settings → Voice Recognition**, choose **Set Up My Voice**, and
+record at least 20 seconds of useful speech. Review the quality summary, analyze,
+then use **Test Recognition** before enabling **Ignore My Voice**. The same screen
+can re-record or delete the profile.
+
+Enrollment PCM is held temporarily in desktop memory and cleared after analysis
+or cancellation. Raw audio is not persisted. The aggregate embedding, model
+revision, thresholds, date, and quality statistics are encrypted with Electron's
+OS-backed secure storage under the app user-data directory. If secure storage is
+unavailable, the profile is not saved. Embeddings and raw recordings are never
+returned by the mobile status API or written to logs.
+
+```text
+Enrollment:
+Phone mic → trusted WSS → memory-only VAD/quality checks
+          → pinned ECAPA worker → consistency check/aggregate embedding
+          → OS-encrypted profile (raw PCM discarded)
+
+Filtered listening:
+Phone mic → trusted WSS → local VAD → opening-audio buffer
+          → ECAPA comparison ─┬─ SELF_MATCH → discard
+                              ├─ UNCERTAIN/error → discard (fail closed)
+                              └─ OTHER_SPEAKER → existing transcription → Q&A
+```
+
+Thresholds are calibrated from the enrollment windows around SpeechBrain's
+documented cosine-comparison method; they are not accuracy percentages. Real-
+world evaluation with multiple consenting speakers, phone positions, volumes,
+and noise conditions is still required for each deployment.
+-->

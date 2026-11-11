@@ -32,9 +32,12 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
     }
     const mobileStatus = document.getElementById('mobileConnectionStatus');
+    const mobilePairingCode = document.getElementById('mobilePairingCode');
+    const mobilePairingDigits = document.getElementById('mobilePairingDigits');
     const renderMobile = status => {
         if (!status.address) {
             mobileStatus.textContent = 'Phone control is disabled.';
+            if (mobilePairingCode) mobilePairingCode.style.display = 'none';
             return;
         }
         const paired = status.devices?.length || 0;
@@ -44,14 +47,20 @@ document.addEventListener('DOMContentLoaded', () => {
             : paired
                 ? `${paired} trusted phone${paired === 1 ? '' : 's'} will reconnect automatically.`
                 : 'No phone has been paired yet.';
-        const pairing = status.pairing?.code ? ` One-time pairing code: ${status.pairing.code}` : '';
-        mobileStatus.textContent = `Desktop address: ${status.address}. ${connection}${pairing}`;
+        mobileStatus.textContent = `Desktop address: ${status.address}. ${connection}`;
+        if (mobilePairingCode && mobilePairingDigits) {
+            const code = status.pairing?.code;
+            mobilePairingCode.style.display = code ? 'block' : 'none';
+            mobilePairingDigits.textContent = code || '';
+        }
     };
     const mobileAction = async action => { try { renderMobile(await action()); } catch (error) { mobileStatus.textContent = error.message; } };
     document.getElementById('mobileEnable').addEventListener('click', () => mobileAction(() => window.electronAPI.setMobileEnabled(true)));
     document.getElementById('mobileDisable').addEventListener('click', () => mobileAction(() => window.electronAPI.setMobileEnabled(false)));
     document.getElementById('mobilePair').addEventListener('click', () => mobileAction(() => window.electronAPI.regenerateMobilePairing()));
     mobileAction(() => window.electronAPI.getMobileConnection());
+    const mobileRefreshTimer = setInterval(() => mobileAction(() => window.electronAPI.getMobileConnection()), 2000);
+    window.addEventListener('beforeunload', () => clearInterval(mobileRefreshTimer), { once: true });
 
     // Request current settings when window opens
     const requestCurrentSettings = () => {

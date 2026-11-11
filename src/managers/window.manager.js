@@ -1861,11 +1861,11 @@ class WindowManager {
     }
   }
 
-  handleRecordingStarted() {
+  handleRecordingStarted(source = 'desktop') {
     this.isRecording = true;
     // Notify all windows about recording state
-    this.broadcastToAllWindows('recording-started');
-    logger.debug('Recording started');
+    this.broadcastToAllWindows('recording-started', { source });
+    logger.debug('Recording started', { source });
   }
 
   handleRecordingStopped() {

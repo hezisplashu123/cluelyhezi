@@ -409,6 +409,7 @@ class SpeechService extends EventEmitter {
     super();
     this.recognizer = null;
     this.isRecording = false;
+    this.captureSource = 'desktop';
     this.audioConfig = null;
     this.speechConfig = null;
     this.sessionStartTime = null;
@@ -547,7 +548,7 @@ class SpeechService extends EventEmitter {
     }
   }
 
-  startRecording() {
+  startRecording({ source = 'desktop' } = {}) {
     try {
       if (!this.available) {
         const errorMsg = `Speech provider "${this.provider}" is not available`;
@@ -565,6 +566,8 @@ class SpeechService extends EventEmitter {
         this.emit('status', 'Please wait for the current transcription to finish');
         return;
       }
+
+      this.captureSource = source;
 
       this.sessionStartTime = Date.now();
       this.retryCount = 0;
@@ -610,11 +613,11 @@ class SpeechService extends EventEmitter {
       await live.connect();
       if (this.liveTranscription !== live || !this.isRecording) return;
       logger.info('Live transcription connected', { model: 'gpt-live-transcribe', silenceMs: 1500 });
-      this.useRendererCapture = process.platform === 'win32' || process.platform === 'darwin';
+      this.useRendererCapture = this.captureSource === 'mobile' || process.platform === 'win32' || process.platform === 'darwin';
       if (!this.useRendererCapture) this._startMicrophoneCapture();
-      this.emit('recording-started');
+      this.emit('recording-started', { source: this.captureSource });
       this.emit('status', 'Live transcription started');
-      if (global.windowManager) global.windowManager.handleRecordingStarted();
+      if (this.captureSource !== 'mobile' && global.windowManager) global.windowManager.handleRecordingStarted(this.captureSource);
     } catch (error) {
       if (this.liveTranscription !== live) return;
       this.emit('error', error.message);
@@ -629,12 +632,12 @@ class SpeechService extends EventEmitter {
     }
 
     this.isRecording = true;
-    this.emit('recording-started');
+    this.emit('recording-started', { source: this.captureSource });
     this.emit('status', 'Azure recording started');
     this._cleanup();
 
     try {
-      this.useRendererCapture = process.platform === 'win32';
+      this.useRendererCapture = this.captureSource === 'mobile' || process.platform === 'win32';
       this.pushStream = sdk.AudioInputStream.createPushStream(
         sdk.AudioStreamFormat.getWaveFormatPCM(16000, 16, 1)
       );
@@ -734,7 +737,7 @@ class SpeechService extends EventEmitter {
     this.pendingFinal = false;
     this.manualStopRequested = false;
     this._resetVadState();
-    this.emit('recording-started');
+    this.emit('recording-started', { source: this.captureSource });
     this.emit('status', 'Local Whisper recording started');
 
     if (this.whisperWorker.isConfigured()) {
@@ -760,11 +763,11 @@ class SpeechService extends EventEmitter {
     // needs; macOS would otherwise require a Homebrew `sox` install (not bundled)
     // and a child-process mic that the system TCC prompt can't attribute. The
     // renderer path uses getUserMedia, which macOS prompts for cleanly via the
-    // app's NSMicrophoneUsageDescription. Windows' renderer is configured by
-    // system-audio.js to capture system playback; Linux keeps native capture.
-    this.useRendererCapture = process.platform === 'win32' || process.platform === 'darwin';
+    // app's NSMicrophoneUsageDescription. Windows' renderer can capture either
+    // system playback or the physical input microphone; Linux keeps native capture.
+    this.useRendererCapture = this.captureSource === 'mobile' || process.platform === 'win32' || process.platform === 'darwin';
     if (this.useRendererCapture) {
-      this.emit('status', process.platform === 'win32'
+      this.emit('status', process.platform === 'win32' && this.captureSource !== 'microphone'
         ? 'Listening to computer audio (microphone excluded)'
         : 'Waiting for microphone audio…');
       // The renderer starts sending chunks once it receives the recording-started event.
@@ -840,6 +843,19 @@ class SpeechService extends EventEmitter {
    * the selected speech provider.
    */
   handleAudioChunkFromRenderer(chunk) {
+    if (this.captureSource === 'mobile') return;
+    this.ingestPcm(chunk);
+  }
+
+  // Accept only 16 kHz, mono, signed 16-bit little-endian PCM. Callers own
+  // source selection and normalization before reaching this shared pipeline.
+  ingestMobilePcm(chunk) {
+    if (this.captureSource !== 'mobile') throw new Error('Phone microphone is not active.');
+    if (this.provider === 'whisper' && this.segmentBytes > 2 * 1024 * 1024) throw new Error('Speech processing is too slow; listening stopped.');
+    this.ingestPcm(chunk);
+  }
+
+  ingestPcm(chunk) {
     if (!this.isRecording || !this.useRendererCapture) {
       return;
     }
@@ -1249,6 +1265,7 @@ class SpeechService extends EventEmitter {
     return {
       provider: this.provider,
       isRecording: this.isRecording,
+      captureSource: this.captureSource,
       isProcessingAudio: this.isProcessingAudio,
       isInitialized: this.provider === 'openai' ? this.available : this.provider === 'azure' ? !!this.speechConfig : !!this.whisperCommand,
       sessionDuration: this.sessionStartTime ? Date.now() - this.sessionStartTime : 0,

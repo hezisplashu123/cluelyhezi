@@ -6,9 +6,20 @@
     "orientation": "portrait",
     "scheme": "opencluely",
     "userInterfaceStyle": "dark",
-    "plugins": ["expo-router", "expo-secure-store"],
-    "ios": { "supportsTablet": true, "infoPlist": { "NSLocalNetworkUsageDescription": "Connect to OpenCluely on your private local network." } },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-asset"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Connect to OpenCluely on your private local network."
+      }
+    },
     "android": {},
-    "experiments": { "typedRoutes": true }
+    "experiments": {
+      "typedRoutes": true
+    }
   }
 }

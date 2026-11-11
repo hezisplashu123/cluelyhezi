@@ -97,12 +97,16 @@ class ConversationStore {
 
   listConversations({ limit = 50, cursor = null } = {}) {
     const safeLimit = Math.max(1, Math.min(100, Number(limit) || 50));
-    const rows = cursor
-      ? this.db.prepare('SELECT * FROM conversations WHERE updated_at < ? ORDER BY updated_at DESC LIMIT ?').all(cursor, safeLimit + 1)
-      : this.db.prepare('SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?').all(safeLimit + 1);
+    const selection = `SELECT c.*, (SELECT content FROM messages m WHERE m.conversation_id=c.id AND m.role='user' ORDER BY m.rowid DESC LIMIT 1) AS preview FROM conversations c`;
+    let position = null;
+    if (cursor) { try { position = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')); } catch (_) { position = { time: cursor, id: '' }; } }
+    const rows = position && typeof position.time === 'string' && typeof position.id === 'string'
+      ? this.db.prepare(`${selection} WHERE c.updated_at < ? OR (c.updated_at = ? AND c.id < ?) ORDER BY c.updated_at DESC, c.id DESC LIMIT ?`).all(position.time, position.time, position.id, safeLimit + 1)
+      : this.db.prepare(`${selection} ORDER BY c.updated_at DESC, c.id DESC LIMIT ?`).all(safeLimit + 1);
     const more = rows.length > safeLimit;
     const items = rows.slice(0, safeLimit).map(row => this.mapConversation(row));
-    return { items, nextCursor: more ? items[items.length - 1].updatedAt : null };
+    const last = items[items.length - 1];
+    return { items, nextCursor: more ? Buffer.from(JSON.stringify({ time: last.updatedAt, id: last.id })).toString('base64url') : null };
   }
 
   createTurn({ conversationId = this.currentConversationId, source, content, skill = null,
@@ -161,7 +165,7 @@ class ConversationStore {
   }
 
   loadAttachments(messageId) {
-    const rows = this.db.prepare('SELECT * FROM attachments WHERE message_id=? ORDER BY created_at,id').all(messageId);
+    const rows = this.db.prepare('SELECT * FROM attachments WHERE message_id=? ORDER BY rowid').all(messageId);
     return rows.map(row => ({
       id: row.id, messageId: row.message_id, localPath: row.local_path,
       mimeType: row.mime_type, size: row.size, contentHash: row.content_hash,
@@ -228,7 +232,7 @@ class ConversationStore {
   }
 
   mapConversation(row) {
-    return { id: row.id, createdAt: row.created_at, updatedAt: row.updated_at, title: row.title, skill: row.skill, metadata: parseJson(row.metadata_json) };
+    return { id: row.id, createdAt: row.created_at, updatedAt: row.updated_at, title: row.title, skill: row.skill, preview: row.preview || null, metadata: parseJson(row.metadata_json) };
   }
 
   transaction(work) {
