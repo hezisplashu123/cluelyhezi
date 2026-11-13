@@ -38,8 +38,8 @@ class WindowManager {
     
     this.windowConfigs = {
       main: {
-        width: 620,
-        height: 35,
+        width: 820,
+        height: 68,
         useContentSize: true,
         file: 'index.html',
         title: 'OpenCluely'
@@ -81,6 +81,12 @@ class WindowManager {
         alwaysOnTop: true,
         visibleOnAllWorkspaces: true,
         fullscreenable: false
+      },
+      listeningIndicator: {
+        width: 112,
+        height: 30,
+        file: 'listening-indicator.html',
+        title: 'Listening status'
       },
       onboarding: {
         width: 560,
@@ -126,6 +132,7 @@ class WindowManager {
       const codeWindow = await this.createWindow('codeResponse');
       this.windows.set('codeResponse', codeWindow);
       await this.createSettingsWindow();
+      await this.createListeningIndicatorWindow();
       
       this.setupWindowEventHandlers();
       this.setupScreenTracking();
@@ -273,6 +280,17 @@ class WindowManager {
     return window;
   }
 
+  async createListeningIndicatorWindow() {
+    if (this.windows.has('listeningIndicator')) return this.windows.get('listeningIndicator');
+    const window = await this.createWindow('listeningIndicator');
+    this.windows.set('listeningIndicator', window);
+    window.setFocusable(false);
+    window.setIgnoreMouseEvents(true, { forward: false });
+    window.setAlwaysOnTop(true, 'screen-saver');
+    window.showInactive();
+    return window;
+  }
+
   async createWindow(type, showOnCreate = false) {
     const windowConfig = this.windowConfigs[type];
     if (!windowConfig) {
@@ -305,7 +323,22 @@ class WindowManager {
     // Type-specific window configurations
     let browserWindowOptions;
     
-    if (type === 'settings') {
+    if (type === 'listeningIndicator') {
+      browserWindowOptions = {
+        ...baseOptions,
+        frame: false,
+        transparent: true,
+        backgroundColor: '#00000000',
+        resizable: false,
+        movable: false,
+        minimizable: false,
+        maximizable: false,
+        closable: false,
+        focusable: false,
+        hasShadow: false,
+        thickFrame: false
+      };
+    } else if (type === 'settings') {
       // Completely minimal settings window - no decorations at all
       browserWindowOptions = {
         ...baseOptions,
@@ -484,7 +517,10 @@ class WindowManager {
     this.applyStealthMeasures(window, type);
     
   // Initialize interaction mode based on current state for ALL windows
-    if (this.isInteractive || !['llmResponse', 'codeResponse'].includes(type)) {
+    if (type === 'listeningIndicator') {
+      window.setFocusable(false);
+      window.setIgnoreMouseEvents(true, { forward: false });
+    } else if (this.isInteractive || !['llmResponse', 'codeResponse'].includes(type)) {
       window.setIgnoreMouseEvents(false);
     } else {
       window.setIgnoreMouseEvents(true, { forward: true });
@@ -705,6 +741,11 @@ class WindowManager {
   }
 
   positionWindow(window, type) {
+    if (type === 'listeningIndicator') {
+      const { x, y } = screen.getPrimaryDisplay().workArea;
+      window.setPosition(x + 14, y + 14);
+      return;
+    }
     if (type === 'codeResponse') {
       const display = this.currentDisplay || screen.getPrimaryDisplay();
       const { x, y, width, height } = display.workArea;
@@ -1089,6 +1130,10 @@ class WindowManager {
     }
 
     this.windows.forEach((window, type) => {
+      if (type === 'listeningIndicator') {
+        if (!window.isDestroyed() && !window.isVisible()) window.showInactive();
+        return;
+      }
       if (type !== 'llmResponse' && type !== 'codeResponse' && type !== 'chat') {
         this.showOnCurrentDesktop(window);
       }
@@ -1109,7 +1154,7 @@ class WindowManager {
 
   hideAllWindows() {
     this.windows.forEach((window, type) => {
-      window.hide();
+      if (type !== 'listeningIndicator') window.hide();
     });
     
     this.isVisible = false;
@@ -1135,6 +1180,12 @@ class WindowManager {
     
     this.windows.forEach((window, type) => {
       if (!window.isDestroyed()) {
+        if (type === 'listeningIndicator') {
+          window.setFocusable(false);
+          window.setIgnoreMouseEvents(true, { forward: false });
+          window.webContents.send('interaction-mode-changed', false);
+          return;
+        }
         const isPanel = type === 'llmResponse' || type === 'codeResponse';
         if (isPanel) window.setFocusable(interactive);
         if (interactive || !isPanel) {
@@ -1861,11 +1912,11 @@ class WindowManager {
     }
   }
 
-  handleRecordingStarted(source = 'desktop') {
+  handleRecordingStarted(source = 'desktop', sessionId = null) {
     this.isRecording = true;
     // Notify all windows about recording state
-    this.broadcastToAllWindows('recording-started', { source });
-    logger.debug('Recording started', { source });
+    this.broadcastToAllWindows('recording-started', { source, sessionId });
+    logger.debug('Recording started', { source, sessionId });
   }
 
   handleRecordingStopped() {

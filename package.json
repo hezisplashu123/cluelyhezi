@@ -13,8 +13,8 @@
     "test-mobile-services": "node scripts/test-mobile-services.cjs",
     "capture-diagnostic": "node scripts/start-electron.cjs --script scripts/check-screen-capture.cjs",
     "test-mobile-main": "node scripts/start-electron.cjs --script scripts/test-mobile-main.cjs",
-    "test": "node scripts/test-screenshot-queue.cjs && node scripts/test-resume-context.cjs && node scripts/test-audio-routing.cjs && node scripts/test-web-primitives.cjs && node scripts/test-mobile-services.cjs && node scripts/test-speaker-verification.cjs",
-    "test-speaker": "node scripts/test-speaker-verification.cjs",
+    "test": "node scripts/test-screenshot-queue.cjs && node scripts/test-resume-context.cjs && node scripts/test-audio-routing.cjs && node scripts/test-web-primitives.cjs && node scripts/test-mobile-services.cjs && node scripts/test-listening-toggle.cjs",
+    "test-listening": "node scripts/test-listening-toggle.cjs",
     "test-speech": "node scripts/test-speech.js",
     "test-resume-context": "node scripts/test-resume-context.cjs",
     "build": "electron-builder",
@@ -83,10 +83,9 @@
       "prompts/**/*",
       "scripts/transcribe-whisper.py",
       "scripts/whisper_worker.py",
-      "scripts/speaker_worker.py",
-      "scripts/setup-speaker-model.ps1",
       "scripts/mouse-routing.ps1",
       "scripts/capture-window-metadata.ps1"
+      ,"scripts/backtick-key-listener.ps1"
     ],
     "mac": {
       "category": "public.app-category.utilities",
@@ -121,15 +120,13 @@
         {
           "target": "nsis",
           "arch": [
-            "x64",
-            "ia32"
+            "x64"
           ]
         },
         {
           "target": "portable",
           "arch": [
-            "x64",
-            "ia32"
+            "x64"
           ]
         }
       ],

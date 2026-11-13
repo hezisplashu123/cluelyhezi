@@ -5,34 +5,22 @@ const crypto = require('crypto');
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 
 class MobileAuthService {
-  initialize(userDataPath) {
+  initialize(userDataPath, password = '9898') {
     this.filePath = path.join(userDataPath, 'mobile-devices.json');
     this.devices = [];
     try { this.devices = JSON.parse(fs.readFileSync(this.filePath, 'utf8')).devices || []; } catch (_) { this.devices = []; }
     this.devices = this.devices.filter(device => !device.expiresAt || Date.parse(device.expiresAt) > Date.now());
-    this.pairing = null;
+    this.password = String(password || '9898');
     this.attempts = new Map();
   }
 
-  generatePairingCode(ttlMs = 5 * 60 * 1000) {
-    this.pairing = { code: String(crypto.randomInt(0, 1000000)).padStart(6, '0'), expiresAt: Date.now() + ttlMs, attempts: 0 };
-    return { code: this.pairing.code, expiresAt: new Date(this.pairing.expiresAt).toISOString() };
-  }
-
-  pair(code, deviceName = 'Mobile device', remoteAddress = '') {
-    if (!this.pairing || Date.now() > this.pairing.expiresAt) throw Object.assign(new Error('Pairing code expired.'), { statusCode: 410 });
-    this.pairing.attempts += 1;
-    if (this.pairing.attempts > 8) {
-      this.pairing = null;
-      throw Object.assign(new Error('Too many pairing attempts.'), { statusCode: 429 });
+  login(password, deviceName = 'Mobile device', remoteAddress = '') {
+    const supplied = Buffer.from(String(password || ''));
+    const expected = Buffer.from(this.password || '9898');
+    if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
+      throw Object.assign(new Error('Incorrect phone password.'), { statusCode: 401, code: 'INVALID_PHONE_PASSWORD' });
     }
-    const supplied = String(code || '');
-    if (!/^\d{6}$/.test(supplied) || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(this.pairing.code))) {
-      throw Object.assign(new Error('Invalid pairing code.'), { statusCode: 401 });
-    }
-    const result = this.issueDevice(deviceName, remoteAddress);
-    this.pairing = null;
-    return result;
+    return this.issueDevice(deviceName, remoteAddress);
   }
 
   issueDevelopmentDevice(deviceName = 'Expo Go', remoteAddress = '', ttlMs = 12 * 60 * 60 * 1000) {

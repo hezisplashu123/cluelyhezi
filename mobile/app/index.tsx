@@ -15,10 +15,23 @@ export default function Dashboard() {
   const [draft, setDraft] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [micIntent, setMicIntent] = useState<boolean | null>(null);
+  const micCommand = useRef(0);
 
   useEffect(() => {
     if (!desktop.loading && !desktop.config) router.replace('/pair');
   }, [desktop.loading, desktop.config, router]);
+
+  const listening = desktop.state?.listening;
+  const speech = desktop.state?.speech;
+  const canonicalMicOn = listening
+    ? listening.desiredOn && listening.source === 'microphone' && listening.state !== 'OFF' && listening.state !== 'ERROR'
+    : !!speech?.isRecording && speech.captureSource === 'microphone';
+  const shownMicOn = micIntent ?? canonicalMicOn;
+
+  useEffect(() => {
+    if (micIntent !== null && canonicalMicOn === micIntent) setMicIntent(null);
+  }, [canonicalMicOn, micIntent]);
 
   const run = async (path: string, body: object = {}) => {
     if (busy) return false;
@@ -39,28 +52,65 @@ export default function Dashboard() {
     }
   };
 
+  const toggleComputerMicrophone = async () => {
+    if (!desktop.connected) return;
+    const enabled = !shownMicOn;
+    const command = ++micCommand.current;
+    setMicIntent(enabled);
+    setNotice('');
+    try {
+      await desktop.action('/api/v1/actions/computer-microphone', { enabled });
+    } catch (error: any) {
+      // A newer tap owns the UI now; do not let an older request roll it back.
+      if (command === micCommand.current) {
+        setMicIntent(null);
+        setNotice(error.message);
+      }
+    }
+  };
+
   if (desktop.loading || !desktop.config) return <View style={s.page} />;
 
   const count = desktop.state?.screenshotQueueCount || 0;
-  const speech = desktop.state?.speech;
-  const computerMicListening = !!speech?.isRecording && speech.captureSource === 'microphone';
-  const otherDesktopAudioListening = !!speech?.isRecording && speech.captureSource !== 'microphone';
+  const computerMicListening = listening
+    ? listening.state === 'LISTENING' && listening.source === 'microphone'
+    : !!speech?.isRecording && speech.captureSource === 'microphone';
+  const otherDesktopAudioListening = listening
+    ? listening.desiredOn && listening.source !== 'microphone'
+    : !!speech?.isRecording && speech.captureSource !== 'microphone';
+  const micStarting = micIntent === true || (micIntent === null && listening?.state === 'STARTING' && listening.source === 'microphone');
+  const micStopping = micIntent === false || (micIntent === null && listening?.state === 'STOPPING' && listening.source === 'microphone');
   const receiverStatus = !desktop.connected
     ? 'Disconnected - reconnecting'
-    : computerMicListening
+    : micStarting
+      ? 'Starting computer microphone'
+      : micStopping
+        ? 'Stopping computer microphone'
+        : computerMicListening
       ? 'Computer microphone listening'
       : otherDesktopAudioListening
         ? 'Another desktop audio source is active'
-        : 'Computer microphone paused';
+        : listening?.state === 'ERROR'
+          ? `Microphone error: ${listening.error || 'unknown error'}`
+          : 'Computer microphone paused';
+  const micButtonText = micStarting
+    ? 'Starting… Tap to stop'
+    : micStopping
+      ? 'Stopping… Tap to start'
+      : shownMicOn
+        ? 'Stop Computer Microphone'
+        : otherDesktopAudioListening
+          ? 'Switch to Computer Microphone'
+          : 'Start Computer Microphone';
 
   return <SafeAreaView style={s.page}><KeyboardAvoidingView style={s.page} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-    <View style={s.header}><View style={s.headerCopy}><Text style={s.title}>YashOpenClue</Text><Text style={s.status}>{receiverStatus}</Text></View><View>{!desktop.connected && <Pressable onPress={async () => { await clearConnection(); desktop.updateConfig(null); router.replace('/pair'); }}><Text style={s.link}>Re-pair</Text></Pressable>}<Pressable onPress={() => router.push('/settings')}><Text style={s.link}>Settings</Text></Pressable></View></View>
+    <View style={s.header}><View style={s.headerCopy}><Text style={s.title}>YashOpenClue</Text><Text style={s.status}>{receiverStatus}</Text></View><View>{!desktop.connected && <Pressable onPress={async () => { await clearConnection(); desktop.updateConfig(null); router.replace('/pair'); }}><Text style={s.link}>Log in</Text></Pressable>}<Pressable onPress={() => router.push('/settings')}><Text style={s.link}>Settings</Text></Pressable></View></View>
     <View style={s.receiver}><Text style={s.receiverTitle}>Phone receiver</Text><Text style={s.receiverText}>Audio is captured by your computer microphone. Questions and answers appear here live.</Text></View>
     {!!(notice || desktop.error) && <Text style={s.error}>{notice || desktop.error}</Text>}
     <FlatList ref={list} data={desktop.messages} keyExtractor={item => item.id} renderItem={({ item }) => <ChatMessage message={item} />} contentContainerStyle={s.messages} ListHeaderComponent={desktop.hasOlder ? <Pressable onPress={desktop.loadOlder}><Text style={s.link}>Load earlier messages</Text></Pressable> : undefined} onScroll={e => { const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent; nearBottom.current = contentSize.height - layoutMeasurement.height - contentOffset.y < 80; }} scrollEventThrottle={100} onContentSizeChange={() => { if (nearBottom.current) list.current?.scrollToEnd({ animated: false }); }} />
     {!!desktop.interim && <Text style={s.interim}>Hearing: {desktop.interim}</Text>}
     <View style={s.controls}>
-      <Pressable accessibilityRole="button" accessibilityLabel={computerMicListening ? 'Stop computer microphone' : 'Start computer microphone'} disabled={!desktop.connected || busy} onPress={() => run('/api/v1/actions/computer-microphone', { enabled: !computerMicListening })} style={[s.mic, computerMicListening && s.micActive]}><Text style={s.buttonText}>{busy ? 'Updating computer microphone...' : computerMicListening ? 'Stop Computer Microphone' : otherDesktopAudioListening ? 'Switch to Computer Microphone' : 'Start Computer Microphone'}</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel={shownMicOn ? 'Stop computer microphone' : 'Start computer microphone'} disabled={!desktop.connected} onPress={toggleComputerMicrophone} style={[s.mic, shownMicOn && s.micActive, !desktop.connected && { opacity: .5 }]}><Text style={s.buttonText}>{micButtonText}</Text></Pressable>
       <View style={s.row}><TextInput value={draft} onChangeText={setDraft} multiline placeholder="Ask a follow-up..." placeholderTextColor="#64748b" style={s.input} /><Pressable disabled={!desktop.connected || busy || !draft.trim()} onPress={ask} style={s.send}><Text style={s.buttonText}>Send</Text></Pressable></View>
       <View style={s.tools}><Pressable onPress={() => router.push('/history')}><Text style={s.link}>History</Text></Pressable><Pressable disabled={!desktop.connected || busy} onPress={() => run('/api/v1/actions/new-conversation')}><Text style={s.link}>New conversation</Text></Pressable><Pressable disabled={!desktop.connected || busy} onPress={() => run('/api/v1/actions/capture')}><Text style={s.link}>Screenshot</Text></Pressable>{count > 0 && <Pressable disabled={!desktop.connected || busy} onPress={() => run('/api/v1/actions/submit')}><Text style={s.link}>Analyze ({count})</Text></Pressable>}</View>
     </View>

@@ -1,6 +1,4 @@
 const http = require('http');
-const https = require('https');
-const fs = require('fs');
 const os = require('os');
 const { WebSocketServer } = require('ws');
 const logger = require('../core/logger').createServiceLogger('MOBILE-BRIDGE');
@@ -35,7 +33,7 @@ class MobileBridge {
     return found.sort((a, b) => score(a) - score(b));
   }
 
-  async start({ host, port = 32190, auth, store, events, actions, stateProvider, speech, verification, tlsCertPath, tlsKeyPath, autoConnect = false }) {
+  async start({ host, port = 32190, auth, store, events, actions, stateProvider, speech, verification, autoConnect = false }) {
     if (this.server) return this.getStatus();
     this.auth = auth; this.store = store; this.events = events; this.actions = actions; this.stateProvider = stateProvider; this.autoConnect = !!autoConnect;
     this.verification = verification;
@@ -48,10 +46,10 @@ class MobileBridge {
     if (!addresses.some(item => item.address === bindHost)) throw new Error('Selected LAN interface is unavailable.');
     this.host = bindHost;
     this.port = Number(port) || 32190;
-    this.secure = !!(tlsCertPath && tlsKeyPath);
-    this.server = this.secure
-      ? https.createServer({ cert: fs.readFileSync(tlsCertPath), key: fs.readFileSync(tlsKeyPath), minVersion: 'TLSv1.2' }, (req, res) => this.handle(req, res))
-      : http.createServer((req, res) => this.handle(req, res));
+    // Expo Go cannot trust a desktop-generated certificate. This bridge is
+    // private-LAN-only and authenticates controls with random device tokens.
+    this.secure = false;
+    this.server = http.createServer((req, res) => this.handle(req, res));
     this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_BODY });
     this.server.on('upgrade', (req, socket, head) => {
       if (req.url !== '/api/v1/events') return socket.destroy();
@@ -66,7 +64,7 @@ class MobileBridge {
       this.server.once('error', onError);
       this.server.listen(this.port, this.host, () => { this.server.off('error', onError); resolve(); });
     });
-    logger.info('Mobile bridge listening', { address: `${this.secure ? 'https' : 'http'}://${this.host}:${this.port}` });
+    logger.info('Mobile bridge listening', { address: `http://${this.host}:${this.port}` });
     return this.getStatus();
   }
 
@@ -91,33 +89,12 @@ class MobileBridge {
       }
       if (data.type === 'ping') ws.send(JSON.stringify({ type: 'pong', timestamp: new Date().toISOString() }));
       if (typeof data.type === 'string' && data.type.startsWith('audio.')) {
-        client.pendingAudio++; client.pendingBytes += raw.length;
-        if (!this.audio || !['audio.start', 'audio.chunk', 'audio.stop'].includes(data.type) || client.pendingAudio > 200 || client.pendingBytes > 1024 * 1024) { ws.close(4008, 'Audio queue limit exceeded'); return; }
-        client.audioQueue = client.audioQueue.then(async () => {
-          if (!this.auth.authenticate(client.token) || ws.readyState !== 1) throw new Error('Device disconnected or revoked.');
-          if (!this.secure && this.verification?.filterEnabled) throw new Error('Voice filtering requires a trusted HTTPS/WSS mobile bridge.');
-          if (data.type === 'audio.start') { await this.audio.start(client.device.id, data); ws.send(JSON.stringify({ type: 'audio.status', status: 'listening', sessionId: data.sessionId })); }
-          if (data.type === 'audio.chunk') this.audio.chunk(client.device.id, data);
-          if (data.type === 'audio.stop') { this.audio.stop(client.device.id, data.sessionId); ws.send(JSON.stringify({ type: 'audio.status', status: 'stopped', sessionId: data.sessionId })); }
-        }).catch(error => { this.audio?.stop(client.device.id); if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'audio.error', message: error.message })); }).finally(() => { client.pendingAudio--; client.pendingBytes -= raw.length; });
+        ws.send(JSON.stringify({ type: 'audio.error', message: 'Phone audio capture has moved to desktop Settings.' }));
+        return;
       }
       if (typeof data.type === 'string' && data.type.startsWith('voice.recording.')) {
-        client.pendingAudio++; client.pendingBytes += raw.length;
-        if (!this.audio || !['voice.recording.start', 'voice.recording.chunk', 'voice.recording.finish', 'voice.recording.cancel'].includes(data.type) || client.pendingAudio > 200 || client.pendingBytes > 1024 * 1024) { ws.close(4008, 'Voice recording queue limit exceeded'); return; }
-        client.audioQueue = client.audioQueue.then(async () => {
-          if (!this.auth.authenticate(client.token) || ws.readyState !== 1) throw new Error('Device disconnected or revoked.');
-          if (!this.secure) throw new Error('Voice enrollment and testing require a trusted HTTPS/WSS mobile bridge.');
-          if (data.type === 'voice.recording.start') { client.failedRecordings.delete(data.sessionId); this.audio.enrollmentStart(client.device.id, data, data.mode === 'test' ? 'test' : 'enroll'); ws.send(JSON.stringify({ type: 'voice.recording.ready', mode: data.mode, sessionId: data.sessionId })); }
-          if (data.type === 'voice.recording.chunk') this.audio.enrollmentChunk(client.device.id, data);
-          if (data.type === 'voice.recording.finish') { const result = await this.audio.enrollmentFinish(client.device.id, data.sessionId); ws.send(JSON.stringify({ type: 'voice.recording.result', mode: data.mode, result })); }
-          if (data.type === 'voice.recording.cancel') this.audio.enrollmentCancel(client.device.id);
-        }).catch(error => {
-          const alreadyFailed = client.failedRecordings.get(data.sessionId) > Date.now();
-          logger.warn('Voice recording message failed', { type: data.type, sessionId: data.sessionId, error: error.message, alreadyFailed, hasEnrollment: !!this.audio?.enrollment, hasListeningSession: !!this.audio?.active });
-          this.audio?.enrollmentCancel(client.device.id);
-          client.failedRecordings.set(data.sessionId, Date.now() + 15000);
-          if (!alreadyFailed && ws.readyState === 1) ws.send(JSON.stringify({ type: 'voice.recording.error', sessionId: data.sessionId, message: error.message }));
-        }).finally(() => { client.pendingAudio--; client.pendingBytes -= raw.length; });
+        ws.send(JSON.stringify({ type: 'voice.recording.error', sessionId: data.sessionId, message: 'Voice enrollment and testing are available only in desktop Settings.' }));
+        return;
       }
     });
     ws.on('close', () => { clearTimeout(client.timer); if (client.device) { this.audio?.stop(client.device.id); this.audio?.enrollmentCancel(client.device.id); } this.clients.delete(client); });
@@ -136,15 +113,18 @@ class MobileBridge {
       const url = new URL(req.url, 'http://local');
       if (req.method === 'GET' && url.pathname === '/') return this.json(res, 200, { success: true, data: { message: 'OpenCluely trusted mobile bridge is running.', health: '/api/v1/health' } });
       if (req.method === 'GET' && url.pathname === '/api/v1/health') return this.json(res, 200, { success: true, data: { available: true, version: 1 } });
-      if (req.method === 'POST' && url.pathname === '/api/v1/pair') {
-        this.limit(req, 'pair', 10, 60_000);
+      if (req.method === 'POST' && url.pathname === '/api/v1/login') {
+        this.limit(req, 'login', 8, 60_000);
         const body = await this.body(req);
-        const result = this.auth.pair(body.code, body.deviceName, req.socket.remoteAddress);
+        const result = this.auth.login(body.password, body.deviceName, req.socket.remoteAddress);
         return this.json(res, 201, { success: true, data: result });
       }
       const device = this.authenticateRequest(req);
       if (!device) return this.json(res, 401, { success: false, error: { code: 'UNAUTHORIZED_DEVICE', message: 'Authentication required.' } });
-      this.limit(req, `control:${device.id}`, 120, 60_000);
+      // Reads and writes have separate budgets so a reconnect/replay burst can
+      // never prevent the microphone stop command from getting through.
+      const isRead = req.method === 'GET';
+      this.limit(req, `${isRead ? 'read' : 'write'}:${device.id}`, isRead ? 600 : 180, 60_000);
 
       if (req.method === 'GET' && url.pathname === '/api/v1/state') return this.ok(res, await this.stateProvider());
       if (req.method === 'GET' && url.pathname === '/api/v1/voice-profile') return this.ok(res, this.verification?.getStatus() || { profile: 'not_set_up', model: 'unavailable', filterEnabled: false });
@@ -163,8 +143,7 @@ class MobileBridge {
       const routes = {
         '/api/v1/actions/capture': 'capture', '/api/v1/actions/submit': 'submit', '/api/v1/actions/clear-queue': 'clearQueue',
         '/api/v1/actions/select-target': 'selectTarget', '/api/v1/actions/set-crop': 'setCrop',
-        '/api/v1/actions/new-conversation': 'newConversation', '/api/v1/actions/select-conversation': 'selectConversation', '/api/v1/actions/audio-source': 'audioSource', '/api/v1/actions/computer-microphone': 'computerMicrophone', '/api/v1/messages': 'sendMessage',
-        '/api/v1/voice-profile/filter': 'voiceFilter', '/api/v1/voice-profile/delete': 'deleteVoiceProfile'
+        '/api/v1/actions/new-conversation': 'newConversation', '/api/v1/actions/select-conversation': 'selectConversation', '/api/v1/actions/audio-source': 'audioSource', '/api/v1/actions/computer-microphone': 'computerMicrophone', '/api/v1/messages': 'sendMessage'
       };
       if (req.method === 'POST' && routes[url.pathname]) {
         const body = await this.body(req);
@@ -239,7 +218,7 @@ class MobileBridge {
   }
   ok(res, data) { return this.json(res, 200, { success: true, data }); }
   json(res, status, value) { res.statusCode = status; if (value == null) return res.end(); res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.end(JSON.stringify(value)); }
-  getStatus() { return { enabled: !!this.server, autoConnect: !!this.autoConnect, secure: !!this.secure, host: this.host || null, port: this.port || null, address: this.server ? `${this.secure ? 'https' : 'http'}://${this.host}:${this.port}` : null, interfaces: this.getLanAddresses(), connectedDevices: [...this.clients].filter(c => c.authenticated).map(c => c.device) }; }
+  getStatus() { return { enabled: !!this.server, autoConnect: !!this.autoConnect, secure: false, host: this.host || null, port: this.port || null, address: this.server ? `http://${this.host}:${this.port}` : null, interfaces: this.getLanAddresses(), connectedDevices: [...this.clients].filter(c => c.authenticated).map(c => c.device) }; }
   disconnectDevice(deviceId) {
     this.audio?.stop(deviceId);
     for (const client of this.clients) if (client.device?.id === deviceId) client.ws.close(4003, 'Credential revoked');

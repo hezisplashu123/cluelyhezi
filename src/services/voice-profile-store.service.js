@@ -25,7 +25,10 @@ class VoiceProfileStore {
     if (!this.file || !fs.existsSync(this.file)) return null;
     if (!this.isEncryptionAvailable()) throw new Error('The saved voice profile cannot be decrypted on this system.');
     const value = JSON.parse(this.safeStorage.decryptString(fs.readFileSync(this.file)));
-    if (!value || value.schemaVersion !== 1 || !Array.isArray(value.embedding)) throw new Error('The saved voice profile is invalid.');
+    if (!value || ![1, 2].includes(value.schemaVersion) || !Array.isArray(value.embedding) || value.embedding.length !== 192 ||
+        value.embedding.some(entry => !Number.isFinite(entry))) {
+      throw new Error('The saved voice profile is invalid.');
+    }
     return value;
   }
 

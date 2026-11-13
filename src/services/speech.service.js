@@ -617,7 +617,6 @@ class SpeechService extends EventEmitter {
       if (!this.useRendererCapture) this._startMicrophoneCapture();
       this.emit('recording-started', { source: this.captureSource });
       this.emit('status', 'Live transcription started');
-      if (this.captureSource !== 'mobile' && global.windowManager) global.windowManager.handleRecordingStarted(this.captureSource);
     } catch (error) {
       if (this.liveTranscription !== live) return;
       this.emit('error', error.message);
@@ -632,8 +631,6 @@ class SpeechService extends EventEmitter {
     }
 
     this.isRecording = true;
-    this.emit('recording-started', { source: this.captureSource });
-    this.emit('status', 'Azure recording started');
     this._cleanup();
 
     try {
@@ -716,6 +713,8 @@ class SpeechService extends EventEmitter {
       () => {
         clearTimeout(startTimeout);
         logger.info('Continuous Azure speech recognition started successfully');
+        this.emit('recording-started', { source: this.captureSource });
+        this.emit('status', 'Azure recording started');
       },
       (error) => {
         clearTimeout(startTimeout);
@@ -863,6 +862,11 @@ class SpeechService extends EventEmitter {
       return;
     }
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    this._forwardPcm(buffer);
+  }
+
+  // This is the only provider-facing PCM sink.
+  _forwardPcm(buffer) {
     if (this.provider === 'openai') {
       if (!this._audioDataLogged) {
         this._audioDataLogged = true;
@@ -1030,8 +1034,9 @@ class SpeechService extends EventEmitter {
     return buffer.length / 32;
   }
 
-  stopRecording() {
+  stopRecording({ discardPending = false } = {}) {
     if (!this.isRecording) {
+      if (discardPending) this._discardPendingAudio();
       return;
     }
 
@@ -1039,6 +1044,11 @@ class SpeechService extends EventEmitter {
     if (this.provider === 'openai') {
       const live = this.liveTranscription;
       this.emit('recording-stopped');
+      if (discardPending) {
+        live?.close();
+        if (this.liveTranscription === live) this._finalizeStop('Recording stopped');
+        return;
+      }
       Promise.resolve(live?.finish()).finally(() => {
         if (this.liveTranscription === live) this._finalizeStop('Recording stopped');
       });
@@ -1051,6 +1061,9 @@ class SpeechService extends EventEmitter {
     });
 
     if (this.provider === 'azure' && this.recognizer) {
+      if (discardPending && this.pushStream?.close) {
+        try { this.pushStream.close(); } catch (_) {}
+      }
       try {
         this.recognizer.stopContinuousRecognitionAsync(
           () => {
@@ -1069,6 +1082,11 @@ class SpeechService extends EventEmitter {
     }
 
     if (this.provider === 'whisper') {
+      if (discardPending) {
+        this._discardPendingAudio();
+        this._finalizeStop('Recording stopped');
+        return;
+      }
       this.isProcessingAudio = true;
       this.emit('recording-stopped');
       this.emit('status', 'Processing local speech…');
@@ -1077,6 +1095,15 @@ class SpeechService extends EventEmitter {
     }
 
     this._finalizeStop('Recording stopped');
+  }
+
+  _discardPendingAudio() {
+    this.segmentBuffers = [];
+    this.segmentBytes = 0;
+    this.pendingFlush = false;
+    this.pendingFinal = false;
+    this.manualStopRequested = true;
+    this._resetVadState();
   }
 
   async _finalizeWhisperStop({ captureAlreadyStopped = false } = {}) {
@@ -1898,22 +1925,8 @@ class SpeechService extends EventEmitter {
       return;
     }
 
-    if (this.provider === 'openai') {
-      this.liveTranscription?.append(Buffer.from(chunk));
-      return;
-    }
-    if (this.provider === 'azure' && this.pushStream) {
-      try {
-        this.pushStream.write(chunk);
-      } catch (error) {
-        logger.error('Error writing audio data to Azure push stream', { error: error.message });
-      }
-      return;
-    }
-
-    if (this.provider === 'whisper') {
-      this._ingestWhisperAudio(Buffer.from(chunk));
-    }
+    const buffer = Buffer.from(chunk);
+    this._forwardPcm(buffer);
   }
 
   async _flushWhisperSegment({ final }) {

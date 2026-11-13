@@ -15,9 +15,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Speech recognition
   startSpeechRecognition: () => ipcRenderer.invoke('start-speech-recognition'),
   stopSpeechRecognition: () => ipcRenderer.invoke('stop-speech-recognition'),
-  sendAudioChunk: (buffer) => ipcRenderer.send('audio-chunk', { buffer }),
-  reportAudioCaptureError: (message) => ipcRenderer.send('audio-capture-error', message),
+  sendAudioChunk: (sessionId, buffer) => ipcRenderer.send('audio-chunk', { sessionId, buffer }),
+  reportAudioCaptureReady: (sessionId, details) => ipcRenderer.send('audio-capture-ready', { sessionId, details }),
+  reportAudioCaptureError: (sessionId, message) => ipcRenderer.send('audio-capture-error', { sessionId, message }),
   getSpeechAvailability: () => ipcRenderer.invoke('get-speech-availability'),
+  getListeningStatus: () => ipcRenderer.invoke('get-listening-status'),
+  onListeningStatus: (callback) => ipcRenderer.on('listening-status', (_event, value) => callback(value)),
   
   // Window management
   showAllWindows: () => ipcRenderer.invoke('show-all-windows'),
@@ -50,7 +53,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   getMobileConnection: () => ipcRenderer.invoke('get-mobile-connection'),
   setMobileEnabled: (enabled) => ipcRenderer.invoke('set-mobile-enabled', enabled),
-  regenerateMobilePairing: () => ipcRenderer.invoke('regenerate-mobile-pairing'),
   setMobileInterface: (host) => ipcRenderer.invoke('set-mobile-interface', host),
   revokeMobileDevice: (deviceId) => ipcRenderer.invoke('revoke-mobile-device', deviceId),
   deleteConversationHistory: () => ipcRenderer.invoke('delete-conversation-history'),

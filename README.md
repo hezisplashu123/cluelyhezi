@@ -62,25 +62,30 @@ The website at [opencluely.techycsr.dev](https://opencluely.techycsr.dev) detect
 
 ## Quick start
 
-On Windows, listening starts automatically when the app opens and continues
-while it runs in the background. The speaker button pauses or
-resumes listening. Capture automatically reconnects after stream interruptions.
-It captures computer
-playback, including the other person's call audio, across audio outputs. It
-does not open your microphone and needs no virtual audio cable. Other playback
+On Windows, the app starts in **Not Listening**. Press the unmodified backtick
+key (the key above Tab) to start listening; press it again to stop. The key
+works globally while OpenCluely is running, including when another application
+has focus. The small click-through indicator in the top-left reflects the real
+provider and PCM capture state. The speaker button uses the same controller.
+
+By default it captures your physical microphone so spoken input appears in the
+toolbar. Settings → Speech Recognition → Listening Source can switch to system
+playback, including the other person's call audio, across audio outputs. That
+mode does not open your microphone and needs no virtual audio cable. Other playback
 (videos, music, and notifications) can also be transcribed. Local Whisper waits
 for about 700 ms of silence, then transcribes; the app combines transcript
 fragments for another 800 ms before requesting an answer. Transcription and AI
 processing add to that delay. System playback capture requires the Electron
 version in this project's dependencies (44 or newer).
-Captured PCM WAV is passed directly into the local Whisper Python environment,
-so speaker transcription does not require FFmpeg with the bundled environment.
+Captured PCM is explicitly resampled to 16 kHz mono before it reaches the
+selected transcription provider. Speaker enrollment and speaker identification
+are not part of the listening path.
 
 To verify routing, run `node scripts/test-audio-routing.cjs`. On Windows,
 `electron scripts/test-system-audio.cjs` also checks actual playback capture
 with a brief quiet tone, confirms no microphone requests, and checks cleanup.
-`electron scripts/test-continuous-audio.cjs` checks automatic startup, hidden
-background capture, recovery after a dropped stream, and manual stop in the real app.
+Run `npm run test-listening` for serialized start/stop, held-key, stale-session,
+OFF-state PCM rejection, error-state, and hook-release coverage.
 
 If you would rather build from source, three steps are all it takes.
 
@@ -171,8 +176,8 @@ For Azure Speech, create a Speech resource in the [Azure Portal](https://portal.
 
 Use `npm.cmd run desktop` for the Windows desktop only, `npm.cmd run phone`
 for the Expo development server only, or `npm.cmd run desktop:phone` to launch
-both together. Enabling phone control always displays a fresh five-minute
-pairing code in desktop Settings; already paired phones may reconnect without it.
+both together. On first use, enter the desktop address and phone password
+`9898`; the phone securely stores its device credential and reconnects afterward.
 
 Application commands are buttons, not global keyboard hooks. The desktop toolbar
 provides capture, send, speech, answer-panel, skill, language and settings controls.
@@ -206,13 +211,11 @@ renders canonical events; SQLite remains authoritative. Permanent device tokens
 are never placed in URLs, and the OpenAI key is never returned by the bridge.
 
 Enable phone control in desktop Settings, then enter the displayed private LAN
-address and six-digit pairing code in the Expo app. Pairing codes expire after
-five minutes; device credentials are stored in the phone's SecureStore and can be
-revoked in desktop Settings. Pairing codes and bearer credentials travel over
-unencrypted HTTP and WebSocket on the LAN; use only a trusted private network.
-Authenticated TLS is required before using untrusted or remote networks. The
-bridge binds to one private interface; do not configure router port forwarding.
-Restart the bridge or generate a new code if the pairing code expires.
+address and phone password `9898` in the Expo app. The password login issues a
+random device credential that is stored in the phone's SecureStore and can be
+revoked in desktop Settings. Passwords and bearer credentials travel over HTTP
+and WebSocket on the LAN; use only a trusted private network. The bridge binds
+to one private interface; do not configure router port forwarding.
 
 The phone is an audio-free receiver. **Start Computer Microphone** remotely
 starts the paired computer's physical input microphone; no phone microphone
@@ -275,8 +278,8 @@ Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 1. Start OpenCluely from the repository with `npm.cmd start`.
 2. Put the phone and computer on the same private network.
 3. In `mobile/`, run `npx.cmd expo start --lan` and scan the QR code with Expo Go.
-4. Enable phone connections in desktop Settings and pair with its displayed
-   LAN address and six-digit code. Later launches reuse the saved credential.
+4. Enable phone connections in desktop Settings and log in with its displayed
+   LAN address and password `9898`. Later launches reuse the saved credential.
 5. Tap **Start Computer Microphone** and speak near the computer. The phone does
    not request microphone permission. Tap **Stop Computer Microphone** when done.
 6. Confirm that the question and streamed answer appear, then send a typed
@@ -372,10 +375,83 @@ Released under the MIT License. See [LICENSE](LICENSE) for details.
 Built by [TechyCSR](https://techycsr.dev). If OpenCluely helped you, consider giving it a star ⭐
 
 </div>
-# Removed: phone microphone flow
+<!-- Legacy speaker-recognition documentation removed from the active product.
 
-The mobile app no longer records audio or requests microphone permission. The
-following design notes are retained only as an archived implementation record.
+Voice enrollment, recognition, and filtering run entirely on the desktop. The
+phone remains a remote control for screenshots, messages, conversation history,
+and starting the computer microphone; it does not record or transport voice.
+
+## Install and enroll
+
+Open desktop **Settings → Voice Recognition** and select **Install / Repair**.
+Model downloads are opt-in. The installer creates `speaker-python` and
+`speaker-models` inside Electron's actual user-data directory, pins
+SpeechBrain's `spkrec-ecapa-voxceleb` revision, and completes a real offline
+embedding before reporting the model ready. Normal use is offline afterward.
+Advanced users may still override discovery with `SPEAKER_PYTHON` and
+`SPEAKER_MODEL_DIR`.
+
+Choose a physical computer microphone, select **Record Voice Profile**, and
+speak naturally in several phrases for 20–30 seconds. The meter and quality
+summary report usable speech, clipping, silence, and noise. Raw enrollment PCM
+is held only in memory and cleared after processing; only the consolidated
+embedding and calibration metadata are saved with Electron OS-backed encryption.
+
+Run **Test Voice Detection** several times before enabling **Ignore My Voice**.
+The displayed cosine score is a model similarity value, not an accuracy
+percentage. Test recordings never enter OpenAI, Azure, Whisper, or the normal AI
+pipeline.
+
+## Audio routing and failure behavior
+
+Both the physical microphone and Windows system-playback capture are normalized
+to 16 kHz mono PCM16 even when the device AudioContext uses another rate. When
+filtering is enabled, every desktop provider uses the same route:
+
+```text
+desktop PCM → local VAD/utterance buffer → SpeechBrain verification
+            ├─ SELF_MATCH → discard
+            ├─ UNCERTAIN / INSUFFICIENT_AUDIO / MODEL_FAILURE → hold or discard
+            └─ OTHER_SPEAKER → OpenAI, Azure, or local Whisper
+```
+
+The opening audio remains buffered until the decision allows it. The gate resets
+at speech-turn boundaries and periodically rechecks long turns. Stopping a
+session invalidates delayed results and clears pending PCM. If the model crashes,
+times out, or becomes unavailable, filtering fails closed and no pending desktop
+audio is sent until the model recovers or the filter is explicitly disabled.
+
+System playback normally captures the other party without opening the physical
+microphone. It can still contain your voice through conference monitoring or
+loopback, so test that route separately. Overlapping voices cannot be perfectly
+separated by a single-speaker embedding; mixed or inconsistent windows are
+treated conservatively as uncertain and may block other-speaker speech.
+
+## Diagnostics and troubleshooting
+
+Run `npm run test-speaker` for automated coverage. For real-audio validation,
+first enroll in Settings, record uncompressed 16 kHz mono PCM16 WAV samples
+through the exact microphone and playback routes you use, then run:
+
+```powershell
+npm run voice-diagnostic -- --self me-near.wav --self me-far.wav --other consenting-speaker.wav --system call-playback.wav
+```
+
+Use `npm run voice-diagnostic -- --health-only` to verify automatic user-data,
+Python, model, dependency, and real-inference discovery without a recording.
+
+The diagnostic prints received frame counts, decisions, similarity values,
+quality warnings, uncertainty rate, and classification latency. Test multiple
+distances and volumes, background noise, pauses, and alternating consenting
+speakers.
+
+If model setup fails, use **Install / Repair** and review its progress text. If
+Python cannot be found, install Python 3.12 with the Windows `py` launcher. If
+microphones are missing, grant microphone permission in Windows Privacy settings
+and reopen Settings. If system playback returns no audio, ensure the shared app
+is playing through the selected Windows output and reselect the capture source.
+
+The following phone-microphone design is retained only as an archived record.
 
 <!-- Legacy phone-microphone design (disabled and not exposed by the app).
 

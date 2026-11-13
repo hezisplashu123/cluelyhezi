@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; font-family: Inter, "Segoe UI", sans-serif; }
+    #pill { height: 30px; display: inline-flex; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid rgba(255,255,255,.12); border-radius: 15px; color: rgba(255,255,255,.86); background: rgba(16,18,22,.88); box-shadow: 0 3px 14px rgba(0,0,0,.24); font-size: 12px; white-space: nowrap; }
+    #dot { width: 8px; height: 8px; border-radius: 50%; background: #7c828d; }
+    body[data-state="LISTENING"] #dot { background: #31d17c; box-shadow: 0 0 7px rgba(49,209,124,.72); }
+    body[data-state="STARTING"] #dot, body[data-state="STOPPING"] #dot { background: transparent; border: 2px solid #8e98a8; border-top-color: #58a6ff; }
+    body[data-state="ERROR"] #dot { width: auto; height: auto; color: #ff7474; background: transparent; font-weight: 800; }
+  </style>
+</head>
+<body data-state="OFF"><div id="pill"><span id="dot"></span><span id="label">Not Listening</span></div><script src="src/ui/listening-indicator.js"></script></body>
+</html>

@@ -7,6 +7,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const closeButton = document.getElementById('closeButton');
     const quitButton = document.getElementById('quitButton');
     const speechProviderSelect = document.getElementById('speechProvider');
+    const listeningSourceSelect = document.getElementById('listeningSource');
     const azureKeyInput = document.getElementById('azureKey');
     const azureRegionInput = document.getElementById('azureRegion');
     const whisperCommandInput = document.getElementById('whisperCommand');
@@ -32,12 +33,9 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
     }
     const mobileStatus = document.getElementById('mobileConnectionStatus');
-    const mobilePairingCode = document.getElementById('mobilePairingCode');
-    const mobilePairingDigits = document.getElementById('mobilePairingDigits');
     const renderMobile = status => {
         if (!status.address) {
             mobileStatus.textContent = 'Phone control is disabled.';
-            if (mobilePairingCode) mobilePairingCode.style.display = 'none';
             return;
         }
         const paired = status.devices?.length || 0;
@@ -46,21 +44,214 @@ document.addEventListener('DOMContentLoaded', () => {
             ? `${connected} phone${connected === 1 ? '' : 's'} connected automatically.`
             : paired
                 ? `${paired} trusted phone${paired === 1 ? '' : 's'} will reconnect automatically.`
-                : 'No phone has been paired yet.';
+                : 'No phone has logged in yet.';
         mobileStatus.textContent = `Desktop address: ${status.address}. ${connection}`;
-        if (mobilePairingCode && mobilePairingDigits) {
-            const code = status.pairing?.code;
-            mobilePairingCode.style.display = code ? 'block' : 'none';
-            mobilePairingDigits.textContent = code || '';
-        }
     };
     const mobileAction = async action => { try { renderMobile(await action()); } catch (error) { mobileStatus.textContent = error.message; } };
     document.getElementById('mobileEnable').addEventListener('click', () => mobileAction(() => window.electronAPI.setMobileEnabled(true)));
     document.getElementById('mobileDisable').addEventListener('click', () => mobileAction(() => window.electronAPI.setMobileEnabled(false)));
-    document.getElementById('mobilePair').addEventListener('click', () => mobileAction(() => window.electronAPI.regenerateMobilePairing()));
     mobileAction(() => window.electronAPI.getMobileConnection());
     const mobileRefreshTimer = setInterval(() => mobileAction(() => window.electronAPI.getMobileConnection()), 2000);
     window.addEventListener('beforeunload', () => clearInterval(mobileRefreshTimer), { once: true });
+
+    // Legacy enrollment code remains guarded for compatibility with stale
+    // cached pages, but the controls and IPC surface are no longer active.
+    let cleanupVoiceCapture = () => null;
+    const voiceUI = {
+        model: document.getElementById('voiceModelStatus'),
+        profile: document.getElementById('voiceProfileStatus'),
+        microphone: document.getElementById('voiceMicrophone'),
+        meter: document.getElementById('voiceMeterFill'),
+        quality: document.getElementById('voiceQuality'),
+        record: document.getElementById('voiceRecord'),
+        cancel: document.getElementById('voiceCancel'),
+        test: document.getElementById('voiceTest'),
+        remove: document.getElementById('voiceDelete'),
+        install: document.getElementById('voiceInstallModel'),
+        filter: document.getElementById('voiceFilterEnabled'),
+        filterDescription: document.getElementById('voiceFilterDescription'),
+        decision: document.getElementById('voiceDecision'),
+        similarity: document.getElementById('voiceSimilarity'),
+        latency: document.getElementById('voiceLatency'),
+        message: document.getElementById('voiceMessage')
+    };
+    if (voiceUI.model) {
+    let voiceCapture = null;
+    let voiceStatus = null;
+
+    const voiceSessionId = () => (crypto.randomUUID ? crypto.randomUUID() : `voice-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const setVoiceMessage = (message, error = false) => {
+        voiceUI.message.textContent = message;
+        voiceUI.message.classList.toggle('voice-error', error);
+    };
+    const renderVoiceStatus = status => {
+        voiceStatus = status;
+        const ready = status?.model === 'ready';
+        voiceUI.model.textContent = ready
+            ? `● Local model ready${status.health?.inferenceMs ? ` · health inference ${status.health.inferenceMs} ms` : ''}`
+            : `● ${status?.model || 'unavailable'}${status?.error ? ` — ${status.error}` : ''}`;
+        voiceUI.model.classList.toggle('voice-good', ready);
+        voiceUI.model.classList.toggle('voice-error', !ready);
+        voiceUI.profile.textContent = status?.profile === 'ready'
+            ? `● Encrypted profile saved${status.createdAt ? ` · ${new Date(status.createdAt).toLocaleDateString()}` : ''}`
+            : '● No voice profile saved';
+        voiceUI.filter.checked = !!status?.filterEnabled;
+        voiceUI.filter.disabled = !ready || status?.profile !== 'ready' || !!voiceCapture;
+        voiceUI.record.disabled = !ready || !!voiceCapture;
+        if (!voiceCapture) voiceUI.record.textContent = status?.profile === 'ready' ? 'Replace Voice Profile' : 'Record Voice Profile';
+        voiceUI.test.disabled = !ready || status?.profile !== 'ready' || !!voiceCapture;
+        if (!voiceCapture) voiceUI.test.textContent = status?.profile === 'ready'
+            ? 'Test Voice Detection'
+            : 'Test Voice Detection (record a profile first)';
+        voiceUI.remove.disabled = status?.profile !== 'ready' || !!voiceCapture;
+        voiceUI.filterDescription.textContent = status?.filteringActive
+            ? 'Filtering active for desktop microphone and system playback.'
+            : 'Filtering inactive. Matching desktop audio is blocked before every transcription provider when enabled.';
+    };
+
+    const listVoiceMicrophones = async () => {
+        try {
+            await window.electronAPI.listVoiceMicrophones();
+            const permission = await navigator.mediaDevices.getUserMedia({ audio: true });
+            permission.getTracks().forEach(track => track.stop());
+            const devices = (await navigator.mediaDevices.enumerateDevices()).filter(device => device.kind === 'audioinput');
+            const selected = localStorage.getItem('voiceRecognitionMicrophone') || 'default';
+            voiceUI.microphone.innerHTML = '';
+            devices.forEach((device, index) => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.textContent = device.label || `Microphone ${index + 1}`;
+                voiceUI.microphone.appendChild(option);
+            });
+            if (devices.some(device => device.deviceId === selected)) voiceUI.microphone.value = selected;
+            else if (devices.length) voiceUI.microphone.value = devices[0].deviceId;
+            localStorage.setItem('voiceRecognitionMicrophone', voiceUI.microphone.value);
+        } catch (error) {
+            voiceUI.microphone.innerHTML = '<option value="">Microphone permission required</option>';
+            setVoiceMessage(`Microphone access failed: ${error.message}`, true);
+        }
+    };
+
+    cleanupVoiceCapture = () => {
+        if (!voiceCapture) return null;
+        const capture = voiceCapture;
+        voiceCapture = null;
+        try { capture.node.onaudioprocess = null; capture.node.disconnect(); } catch (_) {}
+        try { capture.source.disconnect(); } catch (_) {}
+        try { capture.silent.disconnect(); } catch (_) {}
+        capture.stream.getTracks().forEach(track => track.stop());
+        capture.context.close().catch(() => {});
+        capture.resampler.reset();
+        voiceUI.meter.style.width = '0%';
+        voiceUI.cancel.style.display = 'none';
+        voiceUI.record.textContent = voiceStatus?.profile === 'ready' ? 'Replace Voice Profile' : 'Record Voice Profile';
+        voiceUI.test.textContent = 'Test Voice Detection';
+        renderVoiceStatus(voiceStatus || {});
+        return capture;
+    };
+
+    const startVoiceCapture = async mode => {
+        if (voiceCapture) return;
+        const sessionId = voiceSessionId();
+        const start = mode === 'enrollment' ? window.electronAPI.startVoiceEnrollment : window.electronAPI.startVoiceTest;
+        await start(sessionId);
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+                deviceId: voiceUI.microphone.value ? { exact: voiceUI.microphone.value } : undefined,
+                echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1
+            }});
+            const context = new (window.AudioContext || window.webkitAudioContext)();
+            await context.resume();
+            const source = context.createMediaStreamSource(stream);
+            const node = context.createScriptProcessor(2048, 1, 1);
+            const silent = context.createGain(); silent.gain.value = 0;
+            const resampler = new window.Pcm16Resampler(context.sampleRate, 16000);
+            voiceCapture = { mode, sessionId, stream, context, source, node, silent, resampler };
+            node.onaudioprocess = event => {
+                if (!voiceCapture || voiceCapture.sessionId !== sessionId) return;
+                const input = event.inputBuffer.getChannelData(0);
+                let sum = 0; for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+                voiceUI.meter.style.width = `${Math.min(100, Math.sqrt(sum / input.length) * 500)}%`;
+                const pcm = resampler.process(input);
+                if (pcm.length) window.electronAPI.sendVoiceRecordingChunk(sessionId, pcm.buffer);
+            };
+            source.connect(node); node.connect(silent); silent.connect(context.destination);
+            voiceUI.cancel.style.display = '';
+            voiceUI.record.disabled = mode !== 'enrollment';
+            voiceUI.test.disabled = mode !== 'test';
+            if (mode === 'enrollment') voiceUI.record.textContent = 'Stop and Save Profile';
+            else voiceUI.test.textContent = 'Stop and Test';
+            setVoiceMessage(mode === 'enrollment' ? 'Recording locally… speak naturally for 20–30 seconds.' : 'Testing locally… speak naturally for at least 3 seconds.');
+        } catch (error) {
+            await window.electronAPI.cancelVoiceEnrollment(sessionId).catch(() => {});
+            throw error;
+        }
+    };
+
+    const finishVoiceCapture = async () => {
+        const capture = cleanupVoiceCapture();
+        if (!capture) return;
+        setVoiceMessage(capture.mode === 'enrollment' ? 'Building encrypted voice profile…' : 'Running local speaker verification…');
+        try {
+            const completed = capture.mode === 'enrollment'
+                ? await window.electronAPI.stopVoiceEnrollment(capture.sessionId)
+                : await window.electronAPI.stopVoiceTest(capture.sessionId);
+            renderVoiceStatus(completed.status);
+            if (capture.mode === 'test') {
+                const result = completed.result;
+                voiceUI.decision.textContent = result.decision;
+                voiceUI.similarity.textContent = Number.isFinite(result.score) ? result.score.toFixed(3) : '—';
+                voiceUI.latency.textContent = Number.isFinite(result.totalMs) ? `${result.totalMs} ms` : '—';
+                setVoiceMessage(result.decision === 'SELF_MATCH' ? 'Recognized as your voice. This utterance would be ignored.'
+                    : result.decision === 'OTHER_SPEAKER' ? 'Recognized as a different speaker. This utterance would be transcribed.'
+                        : `Audio would not be forwarded (${result.reason || result.decision}).`, result.decision === 'MODEL_FAILURE');
+            } else {
+                setVoiceMessage('Encrypted voice profile saved. Run Test Voice Detection before enabling the filter.');
+            }
+        } catch (error) {
+            setVoiceMessage(error.message, true);
+            renderVoiceStatus(await window.electronAPI.getVoiceStatus());
+        }
+    };
+
+    voiceUI.microphone.addEventListener('change', () => localStorage.setItem('voiceRecognitionMicrophone', voiceUI.microphone.value));
+    voiceUI.record.addEventListener('click', () => voiceCapture?.mode === 'enrollment' ? finishVoiceCapture() : startVoiceCapture('enrollment').catch(error => setVoiceMessage(error.message, true)));
+    voiceUI.test.addEventListener('click', () => voiceCapture?.mode === 'test' ? finishVoiceCapture() : startVoiceCapture('test').catch(error => setVoiceMessage(error.message, true)));
+    voiceUI.cancel.addEventListener('click', async () => {
+        const capture = cleanupVoiceCapture();
+        if (capture) await window.electronAPI.cancelVoiceEnrollment(capture.sessionId);
+        setVoiceMessage('Voice recording cancelled. Temporary audio was cleared.');
+    });
+    voiceUI.filter.addEventListener('change', async () => {
+        try { renderVoiceStatus(await window.electronAPI.setVoiceFilterEnabled(voiceUI.filter.checked)); }
+        catch (error) { voiceUI.filter.checked = false; setVoiceMessage(error.message, true); }
+    });
+    voiceUI.remove.addEventListener('click', async () => {
+        renderVoiceStatus(await window.electronAPI.deleteVoiceProfile());
+        voiceUI.decision.textContent = 'Not tested'; voiceUI.similarity.textContent = '—'; voiceUI.latency.textContent = '—';
+        setVoiceMessage('Encrypted voice profile deleted.');
+    });
+    voiceUI.install.addEventListener('click', async () => {
+        voiceUI.install.disabled = true; setVoiceMessage('Installing the pinned local model. This can take several minutes…');
+        try { renderVoiceStatus(await window.electronAPI.installVoiceModel()); setVoiceMessage('Local voice model installed and verified with real inference.'); }
+        catch (error) { setVoiceMessage(error.message, true); }
+        finally { voiceUI.install.disabled = false; }
+    });
+    window.electronAPI.onVoiceRecordingProgress(progress => {
+        if (!voiceCapture || progress.sessionId !== voiceCapture.sessionId) return;
+        voiceUI.quality.textContent = `${progress.elapsedSeconds.toFixed(1)} s recorded · ${progress.usableSpeechSeconds.toFixed(1)} s usable speech · ${progress.clippingRatio > .015 ? 'clipping detected' : 'level OK'}`;
+    });
+    window.electronAPI.onVoiceRecordingError(error => {
+        if (voiceCapture && error.sessionId === voiceCapture.sessionId) { cleanupVoiceCapture(); setVoiceMessage(error.message, true); }
+    });
+    window.electronAPI.onVoiceStatus(renderVoiceStatus);
+    window.electronAPI.onVoiceModelInstallProgress(line => setVoiceMessage(String(line).trim() || 'Installing local voice model…'));
+    window.addEventListener('beforeunload', () => {
+        const capture = cleanupVoiceCapture();
+        if (capture) window.electronAPI.cancelVoiceEnrollment(capture.sessionId);
+    }, { once: true });
+    Promise.all([window.electronAPI.getVoiceStatus(), listVoiceMicrophones()]).then(([status]) => renderVoiceStatus(status)).catch(error => setVoiceMessage(error.message, true));
+    }
 
     // Request current settings when window opens
     const requestCurrentSettings = () => {
@@ -75,7 +266,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Close button handler
     if (closeButton) {
-        closeButton.addEventListener('click', () => {
+        closeButton.addEventListener('click', async () => {
+            const capture = cleanupVoiceCapture();
+            if (capture) await window.electronAPI.cancelVoiceEnrollment(capture.sessionId).catch(() => {});
             window.api.send('close-settings');
         });
     }
@@ -84,6 +277,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (quitButton) {
         quitButton.addEventListener('click', () => {
             try {
+                const capture = cleanupVoiceCapture();
+                if (capture) window.electronAPI.cancelVoiceEnrollment(capture.sessionId).catch(() => {});
                 // Try multiple ways to quit the app
                 if (window.api && window.api.send) {
                     window.api.send('quit-app');
@@ -109,6 +304,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Function to load settings into UI
     const loadSettingsIntoUI = (settings) => {
         if (settings.speechProvider && speechProviderSelect) speechProviderSelect.value = settings.speechProvider;
+        if (listeningSourceSelect) listeningSourceSelect.value = settings.listeningSource || 'desktop';
         // Always set the input value, even if empty, so the user sees what's
         // currently configured (including env-derived defaults). Previously
         // empty strings were skipped which left stale UI values.
@@ -187,6 +383,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const saveSettings = () => {
         const settings = {};
         if (speechProviderSelect) settings.speechProvider = speechProviderSelect.value;
+        if (listeningSourceSelect) settings.listeningSource = listeningSourceSelect.value;
         if (azureKeyInput) settings.azureKey = azureKeyInput.value;
         if (azureRegionInput) settings.azureRegion = azureRegionInput.value;
         if (whisperCommandInput) settings.whisperCommand = whisperCommandInput.value;
@@ -246,6 +443,7 @@ document.addEventListener('DOMContentLoaded', () => {
         whisperResponseTargetSelect,
         whisperSegmentMsInput,
         geminiKeyInput,
+        listeningSourceSelect,
         windowGapInput
     ];
 

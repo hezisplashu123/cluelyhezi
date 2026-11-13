@@ -74,6 +74,29 @@
         font-size: 11px;
       }
 
+      #settingsButton span { color: rgba(255, 255, 255, 0.9); }
+
+      .speech-input-row {
+        margin-top: 6px;
+        min-height: 30px;
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 11px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 8px;
+        background: rgba(8, 10, 14, 0.82);
+        color: rgba(255, 255, 255, 0.7);
+        font-size: 12px;
+        line-height: 16px;
+        box-sizing: border-box;
+        -webkit-app-region: no-drag;
+      }
+      .speech-input-row.listening { border-color: rgba(49, 209, 124, 0.42); }
+      .speech-input-row.final { color: #fff; border-color: rgba(96, 165, 250, 0.42); }
+      #speechInputText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
       .command-item.recording i {
         color: #ff4757;
         text-shadow: 0 0 10px rgba(255, 71, 87, 0.5);
@@ -377,6 +400,7 @@
       <div class="command-separator"></div>
       <button type="button" class="command-item" id="settingsButton" title="Open desktop settings">
         <i class="fas fa-gear"></i>
+        <span>Settings</span>
       </button>
       <div class="command-separator"></div>
       <div class="command-item" id="skillIndicator">
@@ -400,6 +424,10 @@
       </div>
       <div class="command-separator"></div>
       <div class="status-dot non-interactive" id="statusDot"></div>
+    </div>
+    <div class="speech-input-row" id="speechInputRow">
+      <i class="fas fa-microphone-lines"></i>
+      <span id="speechInputText">Voice input: Not listening</span>
     </div>
 
   <!-- Controls Popover (hidden by default via CSS) -->
@@ -425,7 +453,7 @@
             <td>Desktop Send / Phone Send</td>
             <td>Analyze all queued screenshots</td>
           </tr>
-          <tr><td>Desktop speaker</td><td>Toggle speech</td></tr>
+          <tr><td>Backtick (`)</td><td>Toggle listening globally</td></tr>
           <tr><td>Phone Settings</td><td>Select the capture target</td></tr>
         </tbody>
       </table>
@@ -435,6 +463,7 @@
       </div>
     </div>
 
+    <script src="./src/ui/pcm-resampler.js"></script>
     <script src="./src/ui/main-window.js"></script>
   </body>
 </html>

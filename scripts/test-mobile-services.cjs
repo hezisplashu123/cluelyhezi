@@ -11,17 +11,14 @@ const events = require('../src/services/conversation-events.service');
 const actions = require('../src/services/action-controller.service');
 const WebSocket = require('ws');
 
-test('pairing issues a token, rejects wrong codes, and supports revocation', () => {
+test('phone password login issues a token, rejects wrong passwords, and supports revocation', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencluely-auth-'));
-  auth.initialize(root);
-  const pairing = auth.generatePairingCode(10000);
-  assert.throws(() => auth.pair('999999', 'Wrong'), /Invalid pairing code/);
-  const paired = auth.pair(pairing.code, 'Test phone');
-  assert.equal(auth.authenticate(paired.token).name, 'Test phone');
-  assert.equal(auth.revoke(paired.device.id), true);
-  assert.equal(auth.authenticate(paired.token), null);
-  const expired = auth.generatePairingCode(1); auth.pairing.expiresAt = Date.now() - 1;
-  assert.throws(() => auth.pair(expired.code, 'Expired'), /expired/);
+  auth.initialize(root, '9898');
+  assert.throws(() => auth.login('1111', 'Wrong'), /Incorrect phone password/);
+  const loggedIn = auth.login('9898', 'Test phone');
+  assert.equal(auth.authenticate(loggedIn.token).name, 'Test phone');
+  assert.equal(auth.revoke(loggedIn.device.id), true);
+  assert.equal(auth.authenticate(loggedIn.token), null);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -67,7 +64,7 @@ test('mobile bridge rejects unauthenticated requests and authenticates HTTP and 
   const address = bridge.getLanAddresses()[0]?.address;
   if (!address) return t.skip('No private LAN interface available');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencluely-bridge-'));
-  auth.initialize(root); store.initialize(root);
+  auth.initialize(root, '9898'); store.initialize(root);
   let captureCount = 0; let resendCount = 0; let requestedSource;
   actions.configure({ capture: async ({ sourceId }) => { requestedSource = sourceId; await new Promise(resolve => setTimeout(resolve, 30)); return { success: true, id: 'shot-1', count: ++captureCount }; }, resendMessage: async () => { await new Promise(resolve => setTimeout(resolve, 30)); return { sequence: ++resendCount }; } });
   const port = 33000 + Math.floor(Math.random() * 10000);
@@ -80,12 +77,15 @@ test('mobile bridge rejects unauthenticated requests and authenticates HTTP and 
   const automaticResponse = await fetch(`${base}/api/v1/dev-connect`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ deviceName: 'Expo Go test' }) });
   assert.equal(automaticResponse.status, 401);
   assert.equal((await fetch(`${base}/api/v1/screenshots/shot-1/preview`)).status, 401);
-  const pairing = auth.generatePairingCode();
-  const pairedResponse = await fetch(`${base}/api/v1/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pairing.code, deviceName: 'Bridge test' }) });
-  assert.equal(pairedResponse.status, 201);
-  const paired = (await pairedResponse.json()).data;
+  const wrongLogin = await fetch(`${base}/api/v1/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: '1111', deviceName: 'Wrong phone' }) });
+  assert.equal(wrongLogin.status, 401);
+  const loginResponse = await fetch(`${base}/api/v1/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: '9898', deviceName: 'Bridge test' }) });
+  assert.equal(loginResponse.status, 201);
+  const paired = (await loginResponse.json()).data;
   const state = await fetch(`${base}/api/v1/state`, { headers: { authorization: `Bearer ${paired.token}` } });
   assert.equal(state.status, 200);
+  const readBurst = await Promise.all(Array.from({ length: 130 }, () => fetch(`${base}/api/v1/state`, { headers: { authorization: `Bearer ${paired.token}` } })));
+  assert.equal(readBurst.every(response => response.status === 200), true, 'state refresh bursts stay below the independent read budget');
   const captureBody = JSON.stringify({ requestId: 'same-capture-request', sourceId: 'window:123:0' });
   const captureResponses = await Promise.all([1, 2].map(() => fetch(`${base}/api/v1/actions/capture`, { method: 'POST', headers: { authorization: `Bearer ${paired.token}`, 'content-type': 'application/json' }, body: captureBody })));
   for (const capture of captureResponses) { assert.equal(capture.status, 202); assert.equal((await capture.json()).data.id, 'shot-1'); }
@@ -94,8 +94,7 @@ test('mobile bridge rejects unauthenticated requests and authenticates HTTP and 
   const preview = await fetch(`${base}/api/v1/screenshots/shot-1/preview`, { headers: { authorization: `Bearer ${paired.token}` } });
   assert.equal(preview.status, 404);
   assert.equal((await fetch(`${base}/api/v1/actions/toggle-interaction`, { method: 'POST', headers: { authorization: `Bearer ${paired.token}` } })).status, 404);
-  const secondCode = auth.generatePairingCode().code;
-  const second = (await fetch(`${base}/api/v1/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: secondCode, deviceName: 'Second phone' }) }).then(response => response.json())).data;
+  const second = (await fetch(`${base}/api/v1/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: '9898', deviceName: 'Second phone' }) }).then(response => response.json())).data;
   const resend = token => fetch(`${base}/api/v1/messages/example/resend`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ requestId: 'same-resend' }) }).then(response => response.json());
   const [r1, r2] = await Promise.all([resend(paired.token), resend(paired.token)]);
   assert.equal(r1.data.sequence, 1); assert.equal(r2.data.sequence, 1); assert.equal(resendCount, 1);
@@ -110,9 +109,7 @@ test('mobile bridge rejects unauthenticated requests and authenticates HTTP and 
     const ws = new WebSocket(`ws://${address}:${port}/api/v1/events`);
     ws.on('open', () => ws.send(JSON.stringify({ type: 'authenticate', token: paired.token, lastSequence: events.sequence })));
     ws.on('message', raw => { const value = JSON.parse(raw); if (value.type === 'authenticated') ws.send(JSON.stringify({ type: 'audio.start', sessionId: 'session-123', encoding: 'pcm_s16le', sampleRate: 16000, channels: 1 }));
-      if (value.type === 'audio.status' && value.status === 'listening') { ws.send(JSON.stringify({ type: 'audio.chunk', sessionId: 'session-123', sequence: 1, pcm: Buffer.alloc(320, 1).toString('base64') })); ws.send(JSON.stringify({ type: 'audio.stop', sessionId: 'session-123' })); }
-      if (value.type === 'audio.status' && value.status === 'stopped') { try { assert.ok(speech.bytes > 0); assert.equal(speech.isRecording, false); ws.close(); resolve(); } catch (error) { reject(error); } }
-      if (value.type === 'audio.error') reject(new Error(value.message)); });
+      if (value.type === 'audio.error') { try { assert.match(value.message, /moved to desktop Settings/); assert.equal(speech.bytes || 0, 0); assert.equal(speech.isRecording, false); ws.close(); resolve(); } catch (error) { reject(error); } } });
     ws.on('error', reject);
   });
   auth.revoke(paired.device.id);

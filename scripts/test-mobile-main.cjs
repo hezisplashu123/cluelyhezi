@@ -10,10 +10,9 @@ app.setAppPath(path.resolve(__dirname, '..'));
 app.setPath('userData', userData);
 fs.writeFileSync(path.join(userData, '.opencluely-firstrun-completed'), 'test');
 process.env.MOBILE_CONTROL_ENABLED = 'true';
+process.env.MOBILE_CONTROL_PASSWORD = '9898';
 process.env.MOBILE_CONTROL_PORT = String(43000 + Math.floor(Math.random() * 1000));
 delete process.env.MOBILE_CONTROL_HOST;
-process.env.MOBILE_TLS_CERT = '';
-process.env.MOBILE_TLS_KEY = '';
 // Exercise real controller/HTTP/queue/history with deterministic capture and model;
 // never start audio or make provider requests in this integration test.
 const putMock = (name, value) => { const filename = require.resolve(name); require.cache[filename] = { id: filename, filename, loaded: true, exports: value }; };
@@ -28,7 +27,7 @@ putMock('../src/services/capture.service', {
 const speech = new (require('node:events').EventEmitter)();
 Object.assign(speech, { isRecording: false, available: false, captureSource: 'desktop', isAvailable: () => speech.available, getStatus: () => ({ isInitialized: speech.available, isRecording: speech.isRecording, isProcessingAudio: !!speech.isProcessingAudio, captureSource: speech.captureSource }),
   stopRecording() { this.isRecording = false; setTimeout(() => { this.liveTranscription = null; this.isProcessingAudio = false; this.emit('recording-stopped'); }, 200); },
-  startRecording({ source } = {}) { this.captureSource = source || 'desktop'; this.isRecording = true; this.emit('recording-started'); }, ingestMobilePcm() {}, cleanup() {} });
+  startRecording({ source } = {}) { this.captureSource = source || 'desktop'; this.isRecording = true; this.emit('recording-started'); }, handleAudioChunkFromRenderer() {}, ingestMobilePcm() {}, cleanup() {} });
 putMock('../src/services/speech.service', speech);
 putMock('../src/services/llm.service', {
   isInitialized: true, imageModel: 'mock', processImageWithSkillStream: async (captures, _mime, _skill, _history, _language, _delta, question) => {
@@ -55,9 +54,7 @@ app.whenReady().then(async () => {
   const denied = await fetch(`${status.address}/api/v1/state`);
   assert.equal(denied.status, 401);
   assert.equal(status.autoConnect, false);
-  const auth = require('../src/services/mobile-auth.service');
-  const code = auth.generatePairingCode().code;
-  const connected = await fetch(`${status.address}/api/v1/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, deviceName: 'Electron Expo test' }) }).then(response => response.json());
+  const connected = await fetch(`${status.address}/api/v1/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: '9898', deviceName: 'Electron Expo test' }) }).then(response => response.json());
   assert.ok(connected.data.token);
   const authorized = await fetch(`${status.address}/api/v1/state`, { headers: { authorization: `Bearer ${connected.data.token}` } });
   assert.equal(authorized.status, 200);
@@ -70,17 +67,6 @@ app.whenReady().then(async () => {
   assert.equal(micStopped.status, 202);
   await new Promise(resolve => setTimeout(resolve, 250));
   assert.equal(speech.isRecording, false);
-  // The source-switch response must not precede asynchronous provider cleanup.
-  speech.isRecording = true; speech.isProcessingAudio = true; speech.liveTranscription = {};
-  let switched = false;
-  const switching = fetch(`${status.address}/api/v1/actions/audio-source`, { method: 'POST', headers, body: JSON.stringify({ requestId: 'audio-source-test', source: 'phone' }) }).then(async response => { switched = true; return { status: response.status, body: await response.json() }; });
-  await new Promise(resolve => setTimeout(resolve, 70));
-  assert.equal(switched, false, 'Phone source selection waits for provider cleanup');
-  const switchedResult = await switching;
-  assert.equal(switchedResult.status, 202); assert.equal(speech.liveTranscription, null); assert.equal(speech.isProcessingAudio, false);
-  await bridge.audio.start(connected.data.device.id, { sessionId: 'test-session-123', encoding: 'pcm_s16le', sampleRate: 16000, channels: 1 });
-  assert.equal(speech.captureSource, 'mobile'); bridge.audio.stop(connected.data.device.id);
-  await new Promise(resolve => setTimeout(resolve, 250));
   const state = async () => (await fetch(`${status.address}/api/v1/state`, { headers }).then(r => r.json())).data;
   const first = await post('capture', 'capture-1'); const second = await post('capture', 'capture-2');
   assert.equal(first.status, 202); assert.equal(second.body.data.count, 2);

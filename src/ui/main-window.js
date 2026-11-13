@@ -16,6 +16,8 @@ class MainWindowUI {
         this.micButton = null;
         this.isRecording = false;
         this.captureSource = 'desktop';
+        this.listeningSessionId = null;
+        this.lastVoiceInput = '';
         this.speechAvailable = false; // track availability
         this._popoverHideTimeout = null;
         // Renderer-side audio capture state. Windows uses either system
@@ -27,6 +29,7 @@ class MainWindowUI {
         this._captureGeneration = 0;
         this._captureRetryTimer = null;
         this._audioHealthTimer = null;
+        this._audioResampler = null;
         
         // Define available skills for navigation
         this.availableSkills = [
@@ -251,6 +254,11 @@ class MainWindowUI {
                 const rect = commandTab.getBoundingClientRect();
                 const width = Math.ceil(rect.width);
                 let height = Math.ceil(rect.height);
+                const speechRow = document.getElementById('speechInputRow');
+                if (speechRow) {
+                    const speechRect = speechRow.getBoundingClientRect();
+                    height = Math.max(height, Math.ceil(speechRect.bottom));
+                }
 
                 // If shortcuts popover is visible, extend height to fit it
                 if (this.shortcutsPopover && this.shortcutsPopover.classList.contains('is-open')) {
@@ -447,11 +455,18 @@ class MainWindowUI {
             });
 
             window.electronAPI.onRecordingStarted((_event, data) => {
-                this.handleRecordingStarted(data && data.source);
+                this.handleRecordingStarted(data && data.source, data && data.sessionId);
             });
 
             window.electronAPI.onRecordingStopped(() => {
                 this.handleRecordingStopped();
+            });
+
+            window.electronAPI.onInterimTranscription((_event, data) => {
+                if (data?.text) this.updateSpeechInput(data.text, 'listening');
+            });
+            window.electronAPI.onTranscriptionReceived((_event, data) => {
+                if (data?.text) this.updateSpeechInput(data.text, 'final');
             });
 
             window.electronAPI.onSkillChanged((event, data) => {
@@ -612,10 +627,14 @@ class MainWindowUI {
         logger.debug('Screenshot request received', { component: 'MainWindowUI' });
     }
 
-    handleRecordingStarted(source = 'desktop') {
-        if (this.isRecording) return;
+    handleRecordingStarted(source = 'desktop', sessionId = null) {
+        if (this.isRecording && this.listeningSessionId === sessionId) return;
         this.isRecording = true;
         this.captureSource = source || 'desktop';
+        this.listeningSessionId = sessionId;
+        this.updateSpeechInput(this.captureSource === 'microphone'
+            ? 'Listening to your microphone…'
+            : 'Listening to system audio…', 'listening');
         if (this.micButton) {
             this.micButton.classList.add('recording');
             this.micButton.title = this.captureSource === 'microphone'
@@ -641,7 +660,21 @@ class MainWindowUI {
             this.micButton.title = 'Computer audio paused - click to resume';
         }
         this._stopRendererAudioCapture();
+        this.listeningSessionId = null;
+        if (!this.lastVoiceInput) this.updateSpeechInput('Voice input: Not listening');
         logger.debug('Recording stopped', { component: 'MainWindowUI' });
+    }
+
+    updateSpeechInput(text, mode = '') {
+        const row = document.getElementById('speechInputRow');
+        const label = document.getElementById('speechInputText');
+        if (!row || !label) return;
+        if (mode === 'final') this.lastVoiceInput = String(text).trim();
+        label.textContent = mode === 'final' ? `Heard: ${this.lastVoiceInput}` : String(text);
+        row.classList.toggle('listening', mode === 'listening');
+        row.classList.toggle('final', mode === 'final');
+        row.title = label.textContent;
+        this.resizeWindowToContent();
     }
 
     /** Capture the selected desktop source and normalize it to 16 kHz PCM. */
@@ -659,6 +692,9 @@ class MainWindowUI {
                 })
                 : await navigator.mediaDevices.getUserMedia({
                 audio: {
+                    deviceId: localStorage.getItem('voiceRecognitionMicrophone')
+                        ? { exact: localStorage.getItem('voiceRecognitionMicrophone') }
+                        : undefined,
                     echoCancellation: true,
                     noiseSuppression: true,
                     autoGainControl: true,
@@ -675,6 +711,14 @@ class MainWindowUI {
             if (!stream.getAudioTracks().length) {
                 throw new Error('Computer audio capture returned no audio track.');
             }
+            const activeTrack = stream.getAudioTracks()[0];
+            const activeSettings = activeTrack.getSettings ? activeTrack.getSettings() : {};
+            window.electronAPI.reportAudioCaptureReady?.(this.listeningSessionId, {
+                label: activeTrack.label || (captureSource === 'microphone' ? 'Windows default microphone' : 'System audio'),
+                deviceId: activeSettings.deviceId || null,
+                sampleRate: activeSettings.sampleRate || null,
+                channelCount: activeSettings.channelCount || null
+            });
             stream.getAudioTracks().forEach(track => {
                 track.onended = () => {
                     if (this.isRecording && generation === this._captureGeneration) {
@@ -691,9 +735,7 @@ class MainWindowUI {
             if (generation !== this._captureGeneration || !this.isRecording) {
                 return;
             }
-            if (audioContext.sampleRate !== 16000) {
-                throw new Error('Speech capture requires a 16000 Hz audio context.');
-            }
+            this._audioResampler = new window.Pcm16Resampler(audioContext.sampleRate, 16000);
 
             const mediaSource = audioContext.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
             const bufferSize = 1024;
@@ -707,12 +749,8 @@ class MainWindowUI {
                 }
                 const inputData = event.inputBuffer.getChannelData(0);
                 this._lastAudioChunkAt = Date.now();
-                const pcm16 = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    const s = Math.max(-1, Math.min(1, inputData[i]));
-                    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-                }
-                window.electronAPI.sendAudioChunk(pcm16.buffer);
+                const pcm16 = this._audioResampler.process(inputData);
+                if (pcm16.length) window.electronAPI.sendAudioChunk(this.listeningSessionId, pcm16.buffer);
             };
 
             mediaSource.connect(scriptNode);
@@ -732,6 +770,9 @@ class MainWindowUI {
             logger.info(systemAudio ? 'Computer audio capture started (microphone excluded)' : 'Input audio capture started', { component: 'MainWindowUI' });
         } catch (error) {
             if (generation !== this._captureGeneration) return;
+            if (captureSource === 'microphone' && error.name === 'OverconstrainedError') {
+                localStorage.removeItem('voiceRecognitionMicrophone');
+            }
             logger.error('Failed to start renderer audio capture', {
                 component: 'MainWindowUI',
                 error: error.message
@@ -744,7 +785,7 @@ class MainWindowUI {
         this._stopRendererAudioCapture();
         if (!this.isRecording) return;
         if (window.electronAPI.reportAudioCaptureError) {
-            window.electronAPI.reportAudioCaptureError(reason);
+            window.electronAPI.reportAudioCaptureError(this.listeningSessionId, reason);
         }
         // Keep the speech session and its buffered audio; reopen only capture.
         this._captureRetryTimer = setTimeout(() => {
@@ -773,6 +814,8 @@ class MainWindowUI {
                 this._audioContext.close().catch(() => {});
                 this._audioContext = null;
             }
+            this._audioResampler?.reset();
+            this._audioResampler = null;
             if (this._captureInterval) {
                 clearInterval(this._captureInterval);
                 this._captureInterval = null;

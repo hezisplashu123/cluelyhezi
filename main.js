@@ -1,7 +1,7 @@
 const path = require("path");
 const fs = require("fs");
 const { fileURLToPath } = require("url");
-const { app, BrowserWindow, session, ipcMain, screen, safeStorage } = require("electron");
+const { app, BrowserWindow, session, ipcMain, screen, globalShortcut } = require("electron");
 const { configureSystemAudioCapture, allowAudioCapturePermission } = require('./src/core/system-audio');
 const { resumeContext, MAX_RESUME_BYTES } = require('./src/core/resume-context');
 
@@ -111,7 +111,13 @@ const conversationEvents = require('./src/services/conversation-events.service')
 const mobileAuth = require('./src/services/mobile-auth.service');
 const mobileBridge = require('./src/services/mobile-bridge.service');
 const actionController = require('./src/services/action-controller.service');
-const speakerVerification = require('./src/services/speaker-verification.service');
+const ListeningController = require('./src/services/listening-controller.service');
+const GlobalBacktickService = require('./src/services/global-backtick.service');
+const listeningController = new ListeningController(speechService);
+// A persisted choice always wins. With no previous choice, use the physical
+// microphone so the first-run behavior matches the visible "Voice input" UI.
+listeningController.source = process.env.LISTENING_SOURCE === 'desktop' ? 'desktop' : 'microphone';
+const globalBacktick = new GlobalBacktickService({ globalShortcut });
 
 // Managers
 const windowManager = require("./src/managers/window.manager");
@@ -136,7 +142,6 @@ class ApplicationController {
     this.jobs = new Map();
     this.streams = new Set();
     this.selectedMobileDisplayId = null;
-    this.mobilePairing = null;
 
     // Utterance coalescing: VAD emits a transcript per natural pause, but a
     // single spoken question can still arrive as a few fragments (mid-thought
@@ -285,10 +290,17 @@ class ApplicationController {
       captureService.initialize(conversationStore);
       const savedDisplayId = Number(conversationStore.getMeta('selected_mobile_display_id'));
       this.selectedMobileDisplayId = Number.isFinite(savedDisplayId) ? savedDisplayId : null;
-      mobileAuth.initialize(app.getPath('userData'));
-      await speakerVerification.initialize(app.getPath('userData'), safeStorage);
+      mobileAuth.initialize(app.getPath('userData'), process.env.MOBILE_CONTROL_PASSWORD || '9898');
       this.configureActions();
       await windowManager.initializeWindows({ showMainWindow: !isFirstRun });
+      try {
+        const shortcutStatus = globalBacktick.start(() => {
+          listeningController.toggle().catch(error => logger.error('Backtick listening toggle failed', { error: error.message }));
+        });
+        logger.info('Global backtick listener ready', shortcutStatus);
+      } catch (error) {
+        logger.error('Global backtick listener failed', { error: error.message });
+      }
       captureService.setOverlayCaptureScope(async work => {
         const visible = ['main', 'llmResponse', 'codeResponse'].map(name => windowManager.getWindow(name)).filter(win => win && !win.isDestroyed() && win.isVisible());
         try {
@@ -466,18 +478,10 @@ class ApplicationController {
         if (!['phone', 'desktop'].includes(source)) throw new Error('Invalid audio source.');
         if (mobileBridge.audio?.active) throw new Error('Stop phone listening before changing audio source.');
         if (source === 'phone') {
-          if (speechService.isRecording) speechService.stopRecording();
-          const deadline = Date.now() + 12000;
-          while (speechService.isRecording || speechService.isProcessingAudio || speechService.liveTranscription || speechService.recognizer) {
-            if (Date.now() >= deadline) throw new Error('Desktop audio is still stopping. Wait a moment and try Start Listening again.');
-            await new Promise(resolve => setTimeout(resolve, 50));
-          }
+          await listeningController.stop();
           if (mobileBridge.audio?.active) throw new Error('Another phone started listening. Stop it before switching sources.');
         }
-        if (source === 'desktop' && !speechService.isRecording) {
-          if (!speechService.isAvailable() || speechService.isProcessingAudio) throw new Error('Desktop speech is unavailable or still stopping.');
-          speechService.startRecording();
-        }
+        if (source === 'desktop') await listeningController.start({ source: 'desktop' });
         return { source };
       },
       computerMicrophone: async enabled => {
@@ -489,26 +493,11 @@ class ApplicationController {
         if (phoneSession) mobileBridge.audio.stop(phoneSession.deviceId, phoneSession.sessionId);
 
         if (!enabled) {
-          if (speechService.isRecording && speechService.captureSource === 'microphone') {
-            speechService.stopRecording();
-          }
+          if (listeningController.source === 'microphone') await listeningController.stop();
           return { enabled: false, source: 'microphone' };
         }
-
-        if (!speechService.isAvailable() || speechService.isProcessingAudio) {
-          throw new Error('The computer microphone is unavailable or speech processing is still finishing.');
-        }
-
-        if (speechService.isRecording && speechService.captureSource !== 'microphone') {
-          speechService.stopRecording();
-          const deadline = Date.now() + 12000;
-          while (speechService.isRecording || speechService.isProcessingAudio || speechService.liveTranscription || speechService.recognizer) {
-            if (Date.now() >= deadline) throw new Error('The current desktop audio source is still stopping. Try again in a moment.');
-            await new Promise(resolve => setTimeout(resolve, 50));
-          }
-        }
-
-        if (!speechService.isRecording) speechService.startRecording({ source: 'microphone' });
+        if (listeningController.desiredOn && listeningController.source !== 'microphone') await listeningController.stop();
+        await listeningController.start({ source: 'microphone' });
         return { enabled: true, source: 'microphone' };
       },
       selectConversation: id => {
@@ -524,17 +513,11 @@ class ApplicationController {
         attachmentMessageId: body.attachmentMessageId || null
       }),
       resendMessage: body => this.resendMessage(body.messageId, body.contextMode || 'current', !!body.mobileOrigin)
-      ,voiceFilter: enabled => { if (enabled && !mobileBridge.getStatus().secure) throw new Error('Configure a trusted HTTPS/WSS mobile bridge before enabling voice filtering.'); return speakerVerification.setFilterEnabled(enabled); }
-      ,deleteVoiceProfile: () => { speakerVerification.deleteProfile(); return speakerVerification.getStatus(); }
     });
   }
 
   async startMobileBridge() {
     if (mobileBridge.getStatus().enabled) return mobileBridge.getStatus();
-    // Always expose a short-lived code when the bridge starts. Existing phones
-    // still reconnect with their saved credential, while a replaced/reinstalled
-    // phone is never stranded behind an old trusted-device record.
-    this.mobilePairing = mobileAuth.generatePairingCode();
     const status = await mobileBridge.start({
       host: process.env.MOBILE_CONTROL_HOST || undefined,
       port: Number(process.env.MOBILE_CONTROL_PORT || 32190),
@@ -543,9 +526,7 @@ class ApplicationController {
       events: conversationEvents,
       actions: actionController,
       speech: speechService,
-      verification: speakerVerification,
-      tlsCertPath: process.env.MOBILE_TLS_CERT || undefined,
-      tlsKeyPath: process.env.MOBILE_TLS_KEY || undefined,
+      verification: null,
       stateProvider: Object.assign(() => this.getMobileState(), { getJob: id => this.jobs.get(id) || null }),
       autoConnect: false
     });
@@ -555,7 +536,6 @@ class ApplicationController {
 
   async stopMobileBridge() {
     await mobileBridge.stop();
-    this.mobilePairing = null;
   }
 
   async getMobileState() {
@@ -573,7 +553,7 @@ class ApplicationController {
       activeAIRequest: [...this.jobs.values()].some(job => job.status === 'processing'),
       activeSkill: this.activeSkill,
       speech: speechService.getStatus(),
-      voiceRecognition: speakerVerification.getStatus(),
+      listening: listeningController.getStatus(),
       windows: windowStats,
       currentConversationId: conversationStore.currentConversationId,
       eventSequence: conversationEvents.sequence
@@ -702,13 +682,32 @@ class ApplicationController {
   }
 
   setupServiceEventHandlers() {
+    listeningController.on('status', status => {
+      logger.info('Listening state changed', {
+        state: status.state,
+        source: status.source,
+        providerReady: status.providerReady,
+        captureReady: status.captureReady,
+        pcmFrames: status.pcmFrames,
+        error: status.error
+      });
+      conversationEvents.publish('status.updated', { listening: status });
+      windowManager.broadcastToAllWindows('listening-status', status);
+    });
+    listeningController.on('capture-requested', ({ source, sessionId }) => {
+      windowManager.handleRecordingStarted(source, sessionId);
+    });
+    listeningController.on('capture-stopped', () => {
+      windowManager.handleRecordingStopped();
+    });
+    globalBacktick.on('error', error => logger.error('Backtick listener error', { error: error.message }));
+    globalBacktick.on('exit', code => logger.warn('Backtick listener exited', { code }));
+
     speechService.on("recording-started", () => {
-      if (speechService.captureSource !== 'mobile') windowManager.handleRecordingStarted(speechService.captureSource);
       conversationEvents.publish('status.updated', { speech: speechService.getStatus() });
     });
 
     speechService.on("recording-stopped", () => {
-      windowManager.handleRecordingStopped();
       conversationEvents.publish('status.updated', { speech: speechService.getStatus() });
     });
 
@@ -716,12 +715,13 @@ class ApplicationController {
       conversationEvents.publish('transcription.final', { text });
       if (speechService.captureSource === 'mobile') {
         this.enqueueMobileVoice(text);
-      } else this.handleTranscriptionFragment(text, metadata);
+      } else if (listeningController.allowsTranscription()) this.handleTranscriptionFragment(text, metadata);
     });
 
     speechService.on("interim-transcription", (text) => {
       conversationEvents.publish('transcription.interim', { text });
       if (speechService.captureSource === 'mobile') return;
+      if (!listeningController.allowsTranscription()) return;
       if (text?.trim()) windowManager.showLiveQuestion();
       BrowserWindow.getAllWindows().forEach((window) => {
         window.webContents.send("interim-transcription", { text });
@@ -749,6 +749,19 @@ class ApplicationController {
   }
 
   setupIPCHandlers() {
+  const requireVoiceWindow = (event, type = 'settings') => {
+    const expected = windowManager.getWindow(type);
+    if (expected && !expected.isDestroyed() && event.sender.id === expected.webContents.id) return;
+    // A hidden renderer can invoke during did-finish-load just before
+    // WindowManager stores it. Permit only the exact local application page in
+    // that narrow initialization window; other app pages and remote URLs fail.
+    const expectedPage = type === 'main' ? 'index.html' : 'settings.html';
+    try {
+      const frameUrl = new URL(event.senderFrame?.url || '');
+      if (frameUrl.protocol === 'file:' && decodeURIComponent(frameUrl.pathname).replace(/\\/g, '/').endsWith(`/${expectedPage}`)) return;
+    } catch (_) {}
+    throw new Error('Voice operation rejected from an untrusted window.');
+  };
   ipcMain.handle("take-screenshot", (_event, options) => this.queueScreenshot(options || {}));
   ipcMain.handle("submit-screenshots", () => this.triggerScreenshotOCR());
   ipcMain.handle("show-answer-windows", () => { windowManager.showAnswerWindows(); return { success: true }; });
@@ -772,34 +785,36 @@ class ApplicationController {
       return speechService.isAvailable ? speechService.isAvailable() : false;
     });
 
-    ipcMain.handle("start-speech-recognition", () => {
-      speechService.startRecording();
-      return speechService.getStatus();
-    });
+    ipcMain.handle("start-speech-recognition", () => listeningController.start());
 
-    ipcMain.handle("stop-speech-recognition", () => {
-      speechService.stopRecording();
-      return speechService.getStatus();
-    });
+    ipcMain.handle("stop-speech-recognition", () => listeningController.stop());
+    ipcMain.handle('get-listening-status', () => listeningController.getStatus());
 
     // Raw PCM captured by the renderer from the selected desktop audio source.
-    ipcMain.on('audio-capture-error', (_event, message) => {
-      logger.warn('Computer audio capture interrupted; retrying', { reason: String(message).slice(0, 300) });
-      speechService.emit('error', `Computer audio capture failed: ${String(message).slice(0, 300)}`);
-    });
-    ipcMain.on("audio-chunk", (_event, data) => {
-      if (data && data.buffer) {
-        speechService.handleAudioChunkFromRenderer(Buffer.from(data.buffer));
+    ipcMain.on('audio-capture-ready', (event, data) => {
+      try { requireVoiceWindow(event, 'main'); } catch (_) { return; }
+      if (listeningController.reportCaptureReady(data?.sessionId, data?.details)) {
+        logger.info('Audio capture device ready', data.details || {});
       }
+    });
+    ipcMain.on('audio-capture-error', (event, data) => {
+      try { requireVoiceWindow(event, 'main'); } catch (_) { return; }
+      const message = data?.message || data;
+      logger.warn('Computer audio capture interrupted', { reason: String(message).slice(0, 300) });
+      listeningController.reportCaptureError(data?.sessionId, message);
+    });
+    ipcMain.on("audio-chunk", (event, data) => {
+      try { requireVoiceWindow(event, 'main'); } catch (_) { return; }
+      if (data?.buffer) listeningController.ingestPcm(data.sessionId, Buffer.from(data.buffer));
     });
 
     // Also handle direct send events for fallback
     ipcMain.on("start-speech-recognition", () => {
-      speechService.startRecording();
+      listeningController.start().catch(error => logger.warn('Listening start failed', { error: error.message }));
     });
 
     ipcMain.on("stop-speech-recognition", () => {
-      speechService.stopRecording();
+      listeningController.stop().catch(error => logger.warn('Listening stop failed', { error: error.message }));
     });
 
     ipcMain.on("chat-window-ready", () => {
@@ -821,14 +836,10 @@ class ApplicationController {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) {
           win.webContents.send("speech-availability", { available: this.speechAvailable });
+          win.webContents.send('listening-status', listeningController.getStatus());
         }
       });
-      // Start only once the main renderer has installed its audio listeners.
-      // Capture remains on when the overlay is hidden or another app has focus.
-      if (process.platform === 'win32' && this.speechAvailable && !speechService.isRecording) {
-        logger.info('Starting continuous computer audio listening');
-        speechService.startRecording();
-      }
+      // Listening intentionally remains OFF until an explicit user command.
     });
 
     ipcMain.on("test-chat-window", () => {
@@ -1039,19 +1050,10 @@ class ApplicationController {
       const value = !!enabled;
       this.persistEnvUpdates({ MOBILE_CONTROL_ENABLED: String(value) });
       try {
-        if (value) {
-          await this.startMobileBridge();
-          // Clicking Enable is also an explicit request to pair, even when the
-          // bridge was already running from persisted settings.
-          this.mobilePairing = mobileAuth.generatePairingCode();
-        } else await this.stopMobileBridge();
+        if (value) await this.startMobileBridge();
+        else await this.stopMobileBridge();
       }
       catch (error) { this.persistEnvUpdates({ MOBILE_CONTROL_ENABLED: 'false' }); throw error; }
-      return this.getMobileConnectionSettings();
-    });
-    ipcMain.handle('regenerate-mobile-pairing', () => {
-      if (!mobileBridge.getStatus().enabled) throw new Error('Mobile control is disabled.');
-      this.mobilePairing = mobileAuth.generatePairingCode();
       return this.getMobileConnectionSettings();
     });
     ipcMain.handle('set-mobile-interface', async (_event, host) => {
@@ -1303,31 +1305,10 @@ class ApplicationController {
   }
 
   toggleSpeechRecognition() {
-    const isAvailable = typeof speechService.isAvailable === 'function' ? speechService.isAvailable() : !!speechService.getStatus?.().isInitialized;
-    if (!isAvailable) {
-      logger.warn("Speech recognition unavailable; toggle ignored");
-      try {
-        windowManager.broadcastToAllWindows("speech-status", { status: 'Speech recognition unavailable', available: false });
-        windowManager.broadcastToAllWindows("speech-availability", { available: false });
-      } catch (e) {}
-      return;
-    }
-    const currentStatus = speechService.getStatus();
-    if (currentStatus.isRecording) {
-      try {
-        speechService.stopRecording();
-        logger.info("Speech recognition stopped via global shortcut");
-      } catch (error) {
-        logger.error("Error stopping speech recognition:", error);
-      }
-    } else {
-      try {
-        speechService.startRecording();
-        logger.info("Speech recognition started via global shortcut");
-      } catch (error) {
-        logger.error("Error starting speech recognition:", error);
-      }
-    }
+    return listeningController.toggle().catch(error => {
+      logger.error('Listening toggle failed', { error: error.message });
+      throw error;
+    });
   }
 
   clearSessionMemory() {
@@ -1671,6 +1652,10 @@ class ApplicationController {
 
     // Route speech UI events according to the user's response-target setting.
     sessionManager.addUserInput(fragment, 'speech');
+    const mainWindow = windowManager.getWindow('main');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('transcription-received', { text: fragment });
+    }
     this.sendToVoiceResponseWindows("transcription-received", { text: fragment });
 
     if (metadata.committed) {
@@ -2035,12 +2020,13 @@ class ApplicationController {
   }
 
   onWillQuit() {
+    globalBacktick.stop();
+    listeningController.shutdown().catch(() => {});
     mobileBridge.stop().catch(() => {});
     mouseRouting.stop();
     for (const stream of [...this.streams]) stream.finish();
     conversationStore.close();
     speechService.shutdown();
-    speakerVerification.shutdown();
     windowManager.destroyAllWindows();
 
     const sessionStats = sessionManager.getMemoryUsage();
@@ -2076,6 +2062,7 @@ class ApplicationController {
       windowGap: windowManager.windowGap,
 
       speechProvider: speechService.provider || "whisper",
+      listeningSource: listeningController.source,
       azureKey: process.env.AZURE_SPEECH_KEY || "",
       azureRegion: process.env.AZURE_SPEECH_REGION || "",
       whisperCommand: process.env.WHISPER_COMMAND || "",
@@ -2102,7 +2089,7 @@ class ApplicationController {
       enabled: mobileBridge.getStatus().enabled,
       configuredEnabled: process.env.MOBILE_CONTROL_ENABLED === 'true',
       configuredHost: process.env.MOBILE_CONTROL_HOST || null,
-      pairing: this.mobilePairing,
+      loginRequired: true,
       devices: mobileAuth.listDevices ? mobileAuth.listDevices() : [],
       storage: conversationStore.db ? { ...conversationStore.getStatus(), usage: conversationStore.getStorageUsage() } : null
     };
@@ -2140,6 +2127,20 @@ class ApplicationController {
       // Writing to .env ensures they survive app restarts and are picked
       // up the next time the app boots.
       const envUpdates = {};
+      if (["desktop", "microphone"].includes(settings.listeningSource)) {
+        envUpdates.LISTENING_SOURCE = settings.listeningSource;
+        if (settings.listeningSource !== listeningController.source) {
+          const wasListening = listeningController.desiredOn;
+          if (wasListening) {
+            listeningController.stop()
+              .then(() => listeningController.start({ source: settings.listeningSource }))
+              .catch(error => logger.warn('Could not switch listening source', { error: error.message }));
+          } else {
+            listeningController.source = settings.listeningSource;
+            listeningController._publish();
+          }
+        }
+      }
       if (["azure", "whisper", "openai"].includes(settings.speechProvider)) {
         envUpdates.SPEECH_PROVIDER = settings.speechProvider;
       }
@@ -2243,6 +2244,8 @@ class ApplicationController {
 
       logger.info("Settings saved successfully", {
         ...settings,
+        geminiKey: settings.geminiKey ? '[REDACTED]' : '',
+        azureKey: settings.azureKey ? '[REDACTED]' : '',
         persistedEnvKeys: persistedKeys
       });
       return { success: true, persistedEnvKeys: persistedKeys };

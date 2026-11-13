@@ -23,8 +23,6 @@ class ActionController {
       computerMicrophone: () => this.handlers.computerMicrophone(body.enabled),
       sendMessage: () => this.handlers.sendMessage(body),
       resendMessage: () => this.handlers.resendMessage(body)
-      ,voiceFilter: () => this.handlers.voiceFilter(!!body.enabled)
-      ,deleteVoiceProfile: () => this.handlers.deleteVoiceProfile()
     };
     if (!Object.prototype.hasOwnProperty.call(allowed, action)) {
       throw Object.assign(new Error('Unknown action.'), { statusCode: 404 });

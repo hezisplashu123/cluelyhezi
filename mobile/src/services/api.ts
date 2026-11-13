@@ -22,10 +22,10 @@ async function request<T>(config: DesktopConfig | null, path: string, init: Requ
 }
 
 export const api = {
-  pair: async (baseUrl: string, code: string) => {
-    const response = await fetch(`${baseUrl}/api/v1/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, deviceName: 'Phone' }) });
+  login: async (baseUrl: string, password: string) => {
+    const response = await fetch(`${baseUrl}/api/v1/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password, deviceName: 'Phone' }) });
     const body = await response.json();
-    if (!response.ok || !body.success) throw new DesktopApiError(body.error?.message || 'Pairing failed.', response.status, body.error?.code);
+    if (!response.ok || !body.success) throw new DesktopApiError(body.error?.message || 'Login failed.', response.status, body.error?.code);
     return body.data;
   },
   state: (c: DesktopConfig) => request<DesktopState>(c, '/api/v1/state'),
