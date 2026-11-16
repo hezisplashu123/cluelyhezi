@@ -3,6 +3,15 @@ const { contextBridge, ipcRenderer } = require('electron')
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
+  getAssistantMode: () => ipcRenderer.invoke('get-assistant-mode'),
+  setAssistantMode: mode => ipcRenderer.invoke('set-assistant-mode', mode),
+  forceSendSpeech: () => ipcRenderer.invoke('force-send-speech'),
+  setAudioPreset: preset => ipcRenderer.invoke('set-audio-preset', preset),
+  onAssistantMode: callback => {
+    const handler = (_event, value) => callback(value);
+    ipcRenderer.on('assistant-mode-updated', handler);
+    return () => ipcRenderer.removeListener('assistant-mode-updated', handler);
+  },
   // Screenshot and OCR
   takeScreenshot: () => ipcRenderer.invoke('take-screenshot'),
   submitScreenshots: () => ipcRenderer.invoke('submit-screenshots'),

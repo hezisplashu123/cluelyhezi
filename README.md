@@ -134,7 +134,7 @@ The setup script writes sensible defaults. The only required value is a OpenAI A
 ```bash
 # Required
 OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-5-nano
+OPENAI_MODEL=gpt-6-luna
 
 # Optional speech provider. Pick one.
 SPEECH_PROVIDER=whisper
@@ -533,3 +533,71 @@ documented cosine-comparison method; they are not accuracy percentages. Real-
 world evaluation with multiple consenting speakers, phone positions, volumes,
 and noise conditions is still required for each deployment.
 -->
+
+
+## Persistent conversations, images, and manual listening
+
+Desktop and phone share SQLite-backed context for speech, typed questions,
+images, and screenshots. New Chat keeps saved history and the selected mode.
+Use History to continue or delete a conversation; Settings has a separate,
+confirmed Clear all history action.
+
+Press **Start Listening**, speak for as long as needed, and press the green
+**Send** button to stop capture, finalize the transcript, and submit one question.
+Pauses do not submit questions. Transcription providers may process fixed-size
+chunks internally to bound memory; model submission is controlled by Send.
+The backtick listening shortcut is preserved. It starts/pauses capture; use Send
+to submit. Both the phone and desktop toolbar expose the green Send control.
+
+Normal uses `gpt-6-luna` with `low` reasoning. STAR Behavioral uses `gpt-6.1-sol`
+with `medium` reasoning and detailed, story-driven Situation / Task / Action / Result instructions (typically 450–700 words, with Action receiving the most depth).
+Technical questions stay direct. Change modes in the desktop toolbar or phone
+chat. Legacy `OPENAI_MODEL` / `OPENAI_IMAGE_MODEL` variables do not override this
+shared Q&A pipeline.
+
+Attach up to four PNG/JPEG/WebP images (10 MB and 24 megapixels each) from the phone
+library. Tap saved thumbnails to enlarge them. Original images remain available
+for visual follow-ups. Settings exposes lightweight microphone diagnostics.
+
+Run `npm install` and `npm --prefix mobile install` after updating, restart the
+desktop, and restart Expo. For a custom native mobile build, rebuild once for
+`expo-image-picker`; Expo Go includes the image picker. No new API credentials
+are required. SQLite migrates automatically without deleting saved messages.
+
+See [PHASE2-IMPLEMENTATION.md](PHASE2-IMPLEMENTATION.md) for endpoints, migrations,
+validation results, changed files, and remaining device checks.
+
+
+STAR interview preparation uses the current saved resume and confirmed conversation
+facts. Desktop Settings and the phone show whether resume context is loaded.
+Contact fields are omitted from model context, and resume text is treated as data.
+The target role defaults to Software Engineering Intern; provide a target company
+or job description in chat to tailor the answer. No separate story-bank setup is
+required. See [STAR-SWE-REPORT.md](STAR-SWE-REPORT.md) for research, evaluations,
+examples, and limits. Run `npm run test:swe` for the focused checks or
+`npm run evaluate:swe` for an explicit paid evaluation using the saved resume.
+
+
+## Capital One TIP Case mode
+
+Select **Case** beside Normal/STAR on the phone or in the desktop mode selector.
+It uses `gpt-6.1-sol` with `medium` reasoning for structured case analysis,
+readable calculations, code traces, engineering tradeoffs, and a supported
+recommendation. It retains case facts for follow-ups and works with voice,
+manual green Send, text, images, and screenshots. Case does not apply STAR story
+formatting or personal-project preferences, and it omits the separate resume block.
+
+Normal remains Luna Low; STAR remains Sol Medium. Modes synchronize and persist;
+switching does not clear history or change audio capture. Restart Electron and
+reload Expo after updating. See [CASE-MODE-REPORT.md](CASE-MODE-REPORT.md) for the
+public research sources, exact scope, live checks, and limitations.
+
+Run `npm run test:case` for focused tests. `npm run test:live-case` performs optional
+paid API checks on synthetic cases, without changing saved user conversations.
+
+
+Responses now use plain prose in all modes, including saved history and streaming
+answers. Decorative Markdown bold markers, heading hashes, and bullet prefixes
+are removed for display; code syntax, arithmetic, negative values, and ordinary
+hyphenated words are preserved. Stored message contents are not rewritten.
+Restart the desktop app and Expo after updating the shared display formatter.

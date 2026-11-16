@@ -411,7 +411,7 @@ class ChatWindowUI {
         if (textDiv) {
             // Plain text while streaming keeps it fast and avoids half-parsed
             // markdown flicker; the final render formats it properly.
-            textDiv.textContent = this._streamBuffers[messageId];
+            textDiv.innerHTML = window.plainResponse ? window.plainResponse.toHtml(this._streamBuffers[messageId]) : this.escapeHtml(this._streamBuffers[messageId]);
         }
         const atBottom = true;
         if (atBottom) {
@@ -489,6 +489,7 @@ class ChatWindowUI {
 
     formatMarkdown(text) {
         if (!text) return '';
+        if (window.plainResponse) return window.plainResponse.toHtml(text);
         
         try {
             // Use the markdown.js library for proper markdown parsing

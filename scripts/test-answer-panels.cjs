@@ -107,9 +107,11 @@ app.whenReady().then(async () => {
   await text.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 150))');
   assert.ok(await text.webContents.executeJavaScript("document.querySelector('#pending-qa .qa-answer').innerText.includes('live answer')"), 'Answer streams into Q&A');
   assert.ok(await text.webContents.executeJavaScript("(() => { const el = document.querySelector('.full-content-inner'); return Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop) < 2; })()"), 'Streaming follows the newest answer');
-  manager.showLLMResponse('Final streamed answer.', { messageId: 'stream-check', question: 'Can you explain the follow-up question?' });
+  manager.showLLMResponse('**Final streamed answer.**\n- Keep this plain.', { messageId: 'stream-check', question: 'Can you explain the follow-up question?' });
   await text.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 150))');
   assert.equal(await text.webContents.executeJavaScript("document.querySelectorAll('#pending-qa').length"), 0, 'Completed response replaces pending answer');
+  assert.equal(await text.webContents.executeJavaScript("document.querySelectorAll('.qa-answer strong, .qa-answer ul').length"), 0, 'Answers display plain text instead of Markdown styling');
+  assert.equal(await text.webContents.executeJavaScript("[...document.querySelectorAll('.qa-answer')].at(-1).innerText.includes('**')"), false, 'Raw bold markers are not shown');
   assert.ok(await text.webContents.executeJavaScript("(() => { const el = document.querySelector('.full-content-inner'); return Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop) < 2; })()"), 'Completed answer scrolls to newest entry');
   assert.equal(await text.webContents.executeJavaScript('getComputedStyle(document.body).backgroundColor'), 'rgba(38, 38, 40, 0.16)');
   assert.equal(await text.webContents.executeJavaScript('getComputedStyle(document.body).borderTopWidth'), '1px');

@@ -22,6 +22,11 @@ class ActionController {
       audioSource: () => this.handlers.audioSource(body.source),
       computerMicrophone: () => this.handlers.computerMicrophone(body.enabled),
       sendMessage: () => this.handlers.sendMessage(body),
+      setMode: () => this.handlers.setMode(body.mode),
+      forceSend: () => this.handlers.forceSend(),
+      audioPreset: () => this.handlers.audioPreset(body.preset),
+      deleteConversation: () => { if (body.confirm !== true) throw new Error('Deletion requires confirmation.'); return this.handlers.deleteConversation(body.conversationId); },
+      clearHistory: () => { if (body.confirm !== true) throw new Error('Clearing history requires confirmation.'); return this.handlers.clearHistory(); },
       resendMessage: () => this.handlers.resendMessage(body)
     };
     if (!Object.prototype.hasOwnProperty.call(allowed, action)) {

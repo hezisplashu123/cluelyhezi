@@ -16,6 +16,9 @@ export function useDesktopConnection() {
   const [voiceEvent, setVoiceEvent] = useState<any>(null);
   const [interim, setInterim] = useState('');
   const seq = useRef(0);
+  const activeConversation = useRef<string | null>(null);
+  const historyGeneration = useRef(0);
+  const loadingOlder = useRef(false);
   const socket = useRef<DesktopSocket | undefined>(undefined);
   const fullRefresh = useRef<Promise<void> | null>(null);
   const stateRefresh = useRef<Promise<void> | null>(null);
@@ -30,6 +33,10 @@ export function useDesktopConnection() {
   }, []);
 
   const applyStateSnapshot = useCallback((nextState: DesktopState) => {
+    if (nextState.eventSequence >= seq.current && nextState.currentConversationId !== activeConversation.current) {
+      activeConversation.current = nextState.currentConversationId; historyGeneration.current++;
+      setMessages([]); setNextCursor(null); setInterim('');
+    }
     setState(previous => {
       if (!previous || nextState.eventSequence >= seq.current) return nextState;
       // A live socket event arrived while this request was in flight. Keep its
@@ -43,6 +50,7 @@ export function useDesktopConnection() {
         captureStatus: previous.captureStatus,
         activeAIRequest: previous.activeAIRequest,
         activeSkill: previous.activeSkill,
+        assistantMode: previous.assistantMode,
         currentConversationId: previous.currentConversationId,
         eventSequence: seq.current
       };
@@ -76,9 +84,18 @@ export function useDesktopConnection() {
     const pending = (async () => {
       try {
         const nextState = await api.state(current);
-        const history = await api.messages(current, nextState.currentConversationId);
         applyStateSnapshot(nextState);
-        setMessages(history.items);
+        const generation = historyGeneration.current;
+        const history = await api.messages(current, nextState.currentConversationId);
+        if (activeConversation.current !== nextState.currentConversationId || generation !== historyGeneration.current) return;
+        setMessages(live => {
+          const merged = new Map(history.items.map(m => [m.id, m]));
+          for (const message of live) {
+            const saved = merged.get(message.id);
+            if (!saved || message.updatedAt > saved.updatedAt) merged.set(message.id, message);
+          }
+          return [...merged.values()];
+        });
         setNextCursor(history.nextCursor);
         setError('');
       } catch (failure: any) {
@@ -108,17 +125,26 @@ export function useDesktopConnection() {
       setState(value => value ? { ...value, activeAIRequest: false, captureStatus: event.type === 'job.failed' ? 'error' : 'ready', eventSequence: event.sequence } : value);
     }
     if (event.type === 'conversation.created') {
-      setMessages([]);
+      activeConversation.current = event.payload.id; historyGeneration.current++;
+      setInterim(''); setNextCursor(null); setMessages([]);
+      void loadConnection().then(async current => {
+        if (!current) return;
+        const generation = historyGeneration.current;
+        const page = await api.messages(current, event.payload.id);
+        if (generation !== historyGeneration.current || activeConversation.current !== event.payload.id) return;
+        setMessages(live => [...page.items.filter(m => !live.some(v => v.id === m.id)), ...live]);
+        setNextCursor(page.nextCursor);
+      }).catch(failure => setError(failure.message));
       setState(value => value ? { ...value, currentConversationId: event.payload.id, eventSequence: event.sequence } : value);
     }
     if (event.type === 'transcription.interim') setInterim(event.payload.text || '');
     if (event.type === 'transcription.final') setInterim('');
     if (event.type.startsWith('voice.')) setVoiceEvent(event);
     if (event.type === 'message.created' || event.type === 'response.started') {
-      setMessages(items => items.some(message => message.id === event.payload.id) ? items : [...items, event.payload]);
+      if (event.payload.conversationId === activeConversation.current) setMessages(items => items.some(message => message.id === event.payload.id) ? items : [...items, event.payload]);
     }
     if (event.type === 'response.delta') {
-      setMessages(items => items.map(message => message.id === event.payload.messageId ? { ...message, content: message.content + event.payload.delta, status: 'streaming' } : message));
+      setMessages(items => items.map(message => message.id === event.payload.messageId ? { ...message, content: message.content + event.payload.delta, status: 'streaming', updatedAt: event.timestamp } : message));
     }
     if (event.type === 'response.completed' || event.type === 'response.failed') {
       setMessages(items => items.map(message => message.id === event.payload.id ? event.payload : message));
@@ -156,6 +182,12 @@ export function useDesktopConnection() {
     return () => next.stop();
   }, [config, onEvent, forgetExpiredLogin, refresh]);
 
+  useEffect(() => {
+    if (!config || !connected) return;
+    const timer = setInterval(() => void refreshState(config), 2000);
+    return () => clearInterval(timer);
+  }, [config, connected, refreshState]);
+
   const updateConfig = (value: DesktopConfig | null) => {
     setConfig(value);
     if (!value) {
@@ -173,10 +205,16 @@ export function useDesktopConnection() {
     return result;
   };
   const loadOlder = async () => {
-    if (!config || !state || !nextCursor) return;
-    const page = await api.messages(config, state.currentConversationId, nextCursor);
-    setMessages(items => [...page.items, ...items]);
-    setNextCursor(page.nextCursor);
+    if (!config || !state || !nextCursor || loadingOlder.current) return;
+    const id = state.currentConversationId; const generation = historyGeneration.current;
+    loadingOlder.current = true;
+    try {
+      const page = await api.messages(config, id, nextCursor);
+      if (generation !== historyGeneration.current || id !== activeConversation.current) return;
+      setMessages(items => [...page.items.filter(m => !items.some(v => v.id === m.id)), ...items]);
+      setNextCursor(page.nextCursor);
+    } catch (failure: any) { setError(failure.message); }
+    finally { loadingOlder.current = false; }
   };
   const sendSocket = useCallback((value: object) => socket.current?.send(value) || false, []);
 

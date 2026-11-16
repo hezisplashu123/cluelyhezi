@@ -107,6 +107,8 @@ const speechService = require("./src/services/speech.service");
 const llmService = require("./src/services/llm.service");
 const mouseRouting = require('./src/services/mouse-routing.service');
 const conversationStore = require('./src/services/conversation-store.service');
+const assistantMode = require('./src/services/assistant-mode.service');
+const pendingUtterance = new (require('./src/services/pending-utterance.service').PendingUtterance)();
 const conversationEvents = require('./src/services/conversation-events.service');
 const mobileAuth = require('./src/services/mobile-auth.service');
 const mobileBridge = require('./src/services/mobile-bridge.service');
@@ -287,6 +289,10 @@ class ApplicationController {
       const isFirstRun = status.needsOnboarding;
 
       conversationStore.initialize(app.getPath('userData'));
+      assistantMode.initialize(conversationStore);
+      speechService.manualSendEnabled = true;
+      speechService.audioPreset = conversationStore.getMeta('audio_preset') || 'standard';
+      speechService.conversationId = conversationStore.currentConversationId;
       captureService.initialize(conversationStore);
       const savedDisplayId = Number(conversationStore.getMeta('selected_mobile_display_id'));
       this.selectedMobileDisplayId = Number.isFinite(savedDisplayId) ? savedDisplayId : null;
@@ -457,9 +463,10 @@ class ApplicationController {
       submit: (body = {}) => {
         if (!this.screenshots.images.length) throw Object.assign(new Error('No screenshots queued.'), { code: 'EMPTY_QUEUE' });
         if ([...this.jobs.values()].some(job => job.type === 'screenshot' && job.status === 'processing')) throw Object.assign(new Error('A submission is already processing.'), { code: 'SUBMISSION_BUSY' });
+        const conversationId = conversationStore.currentConversationId;
         return this.startJob('screenshot', () => body.mobileOrigin
-          ? this.queueMobileTask(() => this.triggerScreenshotOCR('general_qa'))
-          : this.triggerScreenshotOCR());
+          ? this.queueMobileTask(() => this.triggerScreenshotOCR('general_qa', conversationId))
+          : this.triggerScreenshotOCR(undefined, conversationId));
       },
       clearQueue: () => this.screenshots.clear(),
       showAnswerPanels: () => { windowManager.showAnswerWindows(); return { success: true }; },
@@ -471,7 +478,6 @@ class ApplicationController {
       selectSkill: skill => this.selectSkill(skill),
       movePanels: direction => this.moveAnswerPanels(direction),
       newConversation: () => {
-        if (this._mobilePending || [...this.jobs.values()].some(job => job.status === 'processing')) throw new Error('Wait for the current answer before starting a new conversation.');
         return this.startNewConversation();
       },
       audioSource: async source => {
@@ -485,6 +491,7 @@ class ApplicationController {
         return { source };
       },
       computerMicrophone: async enabled => {
+        if (this._sendingSpeech) throw new Error('Wait for the recording to finish sending.');
         if (typeof enabled !== 'boolean') throw new Error('The computer microphone state must be true or false.');
 
         // The receiver flow owns no phone audio. Close a legacy phone session
@@ -503,15 +510,19 @@ class ApplicationController {
       selectConversation: id => {
         const conversation = conversationStore.getConversation(id);
         if (!conversation) throw Object.assign(new Error('Conversation not found.'), { statusCode: 404 });
-        if (this._mobilePending || [...this.jobs.values()].some(job => job.status === 'processing')) throw new Error('Wait for the current answer before switching conversations.');
-        conversationStore.currentConversationId = id; conversationStore.setMeta('current_conversation_id', id);
+        conversationStore.selectConversation(id); this.clearPendingSpeech();
         sessionManager.clear(); conversationEvents.publish('conversation.created', conversation);
         return conversation;
       },
       sendMessage: body => this.submitTextQuestion(body.content, {
-        source: body.mobileOrigin ? 'mobile_text' : 'chat', contextMode: body.contextMode || 'current',
+        source: body.mobileOrigin ? 'mobile_text' : 'chat', conversationId: body.conversationId, attachmentIds: body.attachmentIds || [], ownerDeviceId: body.deviceId, contextMode: body.contextMode || 'current',
         attachmentMessageId: body.attachmentMessageId || null
       }),
+      setMode: mode => this.setAssistantMode(mode),
+      forceSend: () => this.forceSendSpeech(),
+      audioPreset: preset => { speechService.setAudioPreset(preset); conversationEvents.publish('status.updated', { speech: this.publicSpeechStatus() }); return { preset }; },
+      deleteConversation: id => { this.assertHistoryIdle(); const wasActive = id === conversationStore.currentConversationId; const active = conversationStore.deleteConversation(id); if (wasActive) { this.clearPendingSpeech(); conversationEvents.publish('conversation.created', active); } else conversationEvents.publish('conversation.deleted', { id }); return active; },
+      clearHistory: () => { this.assertHistoryIdle(); const active = conversationStore.deleteAllHistory(); this.clearPendingSpeech(); conversationEvents.publish('conversation.created', active); return active; },
       resendMessage: body => this.resendMessage(body.messageId, body.contextMode || 'current', !!body.mobileOrigin)
     });
   }
@@ -552,7 +563,10 @@ class ApplicationController {
       captureStatus: captureService.isProcessing ? 'capturing' : this.screenshots.submitting ? 'processing' : 'ready',
       activeAIRequest: [...this.jobs.values()].some(job => job.status === 'processing'),
       activeSkill: this.activeSkill,
-      speech: speechService.getStatus(),
+      assistantMode: assistantMode.snapshot(),
+      resumeStatus: resumeContext.getPublicStatus(),
+      utterance: { pending: !!this._utteranceBuffer || !!this._voiceQuestionQueue.length || speechService.hasPendingSpeech?.(), state: this._sendingSpeech ? 'Finalizing recording' : listeningController.desiredOn ? 'Recording - press Send when finished' : 'Ready - press Start Listening' },
+      speech: this.publicSpeechStatus(),
       listening: listeningController.getStatus(),
       windows: windowStats,
       currentConversationId: conversationStore.currentConversationId,
@@ -594,8 +608,10 @@ class ApplicationController {
   }
 
   startNewConversation() {
+    this.clearPendingSpeech();
     sessionManager.clear();
     const conversation = conversationStore.createConversation({ title: 'Conversation', skill: this.activeSkill });
+    speechService.conversationId = conversation.id;
     conversationEvents.publish('conversation.created', conversation);
     windowManager.broadcastToAllWindows('session-cleared');
     return conversation;
@@ -618,13 +634,15 @@ class ApplicationController {
     return { direction };
   }
 
-  submitTextQuestion(text, { source = 'chat', contextMode = 'current', originalMessageId = null, attachmentMessageId = null } = {}) {
+  submitTextQuestion(text, { source = 'chat', contextMode = 'current', originalMessageId = null, attachmentMessageId = null, conversationId = conversationStore.currentConversationId, attachmentIds = [], ownerDeviceId = null } = {}) {
     const content = String(text || '').trim();
-    if (!content) throw new Error('Question cannot be empty.');
+    if (!content && !attachmentIds.length) throw new Error('Question cannot be empty.');
+    if (content.length > 32000) throw new Error('Question is too long.');
+    if (conversationId !== conversationStore.currentConversationId) throw new Error('Conversation changed. Review your draft before sending.');
     const skill = source.startsWith('mobile_') ? 'general_qa' : this.activeSkill;
     if (attachmentMessageId) {
       const original = conversationStore.getMessage(attachmentMessageId);
-      if (!original || original.role !== 'user') throw Object.assign(new Error('The screenshot question was not found.'), { statusCode: 404 });
+      if (!original || original.role !== 'user' || original.conversationId !== conversationId) throw Object.assign(new Error('The screenshot question was not found.'), { statusCode: 404 });
       const attachments = conversationStore.loadAttachments(original.id);
       if (!attachments.length || attachments.some(item => !item.exists)) throw Object.assign(new Error('The saved screenshot context is unavailable.'), { statusCode: 410 });
       const captures = attachments.map(item => ({ imageBuffer: fs.readFileSync(item.localPath), mimeType: item.mimeType, metadata: item.metadata }));
@@ -636,7 +654,7 @@ class ApplicationController {
       conversationEvents.publish('response.started', turn.assistant);
       return this.startJob('screenshot-text', () => skill === 'general_qa' ? this.queueMobileTask(() => this.analyzeScreenshots(captures, { turn, contextMode, question: content, skill })) : this.analyzeScreenshots(captures, { turn, contextMode, question: content, skill }));
     }
-    const turn = conversationStore.createTurn({ source, content, skill, contextMode, originalMessageId });
+    const turn = conversationStore.createTurn({ conversationId, source, content, skill, contextMode, originalMessageId, attachmentIds, ownerDeviceId });
     sessionManager.addUserInput(content, source === 'speech' ? 'speech' : 'chat');
     conversationEvents.publish('message.created', turn.user);
     conversationEvents.publish('response.started', turn.assistant);
@@ -651,34 +669,62 @@ class ApplicationController {
     return next;
   }
 
-  mobileHistory(turn, contextMode) {
-    if (contextMode === 'fresh') return [];
-    const items = conversationStore.getMessages(turn.user.conversationId, { limit: 40 }).items;
-    const completed = new Map(items.filter(item => item.role === 'assistant' && item.status === 'completed').map(item => [item.turnId, item]));
-    return items.filter(item => item.role === 'user' && item.id !== turn.user.id && completed.has(item.turnId)).slice(-3).flatMap(item => [
-      { role: 'user', content: item.content }, { role: 'model', content: completed.get(item.turnId).content }
-    ]);
-  }
-
-  enqueueMobileVoice(text) {
-    const content = String(text || '').trim();
-    if (!content) return;
-    logger.info('Phone utterance finalized', { at: new Date().toISOString() });
-    const turn = conversationStore.createTurn({ source: 'mobile_voice', content, skill: 'general_qa', contextMode: 'current' });
-    conversationEvents.publish('message.created', turn.user);
-    conversationEvents.publish('response.started', turn.assistant);
-    this.queueMobileTask(async () => {
-      sessionManager.addUserInput(content, 'speech');
-      await this.processWithLLM(content, sessionManager.getOptimizedHistory(), { turn, skill: 'general_qa' });
-    }).catch(() => {});
-  }
-
   resendMessage(messageId, contextMode, mobileOrigin = false) {
     if (!['current', 'fresh'].includes(contextMode)) throw new Error('Context mode must be current or fresh.');
     const original = conversationStore.getMessage(messageId);
     if (!original || original.role !== 'user') throw Object.assign(new Error('Original question was not found.'), { statusCode: 404 });
     if (!original.attachmentCount) return this.submitTextQuestion(original.content, { source: mobileOrigin ? 'mobile_text' : 'resend', contextMode, originalMessageId: original.id });
     return this.submitTextQuestion(original.content, { source: mobileOrigin ? 'mobile_text' : 'screenshot', contextMode, attachmentMessageId: original.id });
+  }
+
+  publicSpeechStatus() {
+    const { effectiveSettings, config, ...status } = speechService.getStatus();
+    return status;
+  }
+
+  assertHistoryIdle() {
+    if (this._mobilePending || this._utteranceDispatchInFlight || [...this.jobs.values()].some(job => job.status === 'processing')) throw new Error('Wait for current requests before deleting history.');
+  }
+
+  clearPendingSpeech() {
+    clearTimeout(this._utteranceTimer); this._utteranceTimer = null;
+    this._utteranceBuffer = ''; this._voiceQuestionQueue = [];
+    speechService.discardPendingSpeech?.();
+    speechService.conversationId = conversationStore.currentConversationId;
+  }
+
+  setAssistantMode(mode) {
+    const value = assistantMode.set(mode);
+    conversationEvents.publish('status.updated', { assistantMode: value });
+    windowManager.broadcastToAllWindows('assistant-mode-updated', value);
+    return value;
+  }
+
+  forceSendSpeech() {
+    if (this._forcePromise) return this._forcePromise;
+    const conversationId = conversationStore.currentConversationId;
+    this._forcePromise = (async () => {
+      this._sendingSpeech = true;
+      this._forcingSpeech = true;
+      clearTimeout(this._utteranceTimer); this._utteranceTimer = null;
+      // Stop accepting/capturing PCM first; retain the provider until its final transcript arrives.
+      listeningController.pauseCaptureForSend();
+      try {
+        await speechService.finalizePendingSpeech();
+        await listeningController.stop();
+        if (conversationId !== conversationStore.currentConversationId) return { message: 'Conversation changed; the previous recording was not sent to the new chat.' };
+        const content = pendingUtterance.merge([...this._voiceQuestionQueue, this._utteranceBuffer]);
+        this._voiceQuestionQueue = []; this._utteranceBuffer = '';
+        if (!content) return { message: 'No speech was captured. Press Start Listening and try again.' };
+        const turn = conversationStore.createTurn({ conversationId, source: 'speech', content, skill: this.activeSkill, contextMode: 'current', metadata: { utteranceId: pendingUtterance.createId(), manuallySent: true } });
+        const job = this.startJob('speech', () => this.processTranscriptionWithLLM(content, { recent: [] }, turn));
+        return { message: 'Listening stopped. Sending your question.', jobId: job.id };
+      } finally {
+        await listeningController.stop();
+        this._sendingSpeech = false; this._forcingSpeech = false;
+      }
+    })().finally(() => { this._forcePromise = null; });
+    return this._forcePromise;
   }
 
   setupServiceEventHandlers() {
@@ -704,18 +750,17 @@ class ApplicationController {
     globalBacktick.on('exit', code => logger.warn('Backtick listener exited', { code }));
 
     speechService.on("recording-started", () => {
-      conversationEvents.publish('status.updated', { speech: speechService.getStatus() });
+      if (!this._sendingSpeech) { this._utteranceBuffer = ''; this._voiceQuestionQueue = []; }
+      conversationEvents.publish('status.updated', { speech: this.publicSpeechStatus() });
     });
 
     speechService.on("recording-stopped", () => {
-      conversationEvents.publish('status.updated', { speech: speechService.getStatus() });
+      conversationEvents.publish('status.updated', { speech: this.publicSpeechStatus() });
     });
 
     speechService.on("transcription", (text, metadata) => {
       conversationEvents.publish('transcription.final', { text });
-      if (speechService.captureSource === 'mobile') {
-        this.enqueueMobileVoice(text);
-      } else if (listeningController.allowsTranscription()) this.handleTranscriptionFragment(text, metadata);
+      if (this._sendingSpeech || listeningController.allowsTranscription()) this.handleTranscriptionFragment(text, metadata);
     });
 
     speechService.on("interim-transcription", (text) => {
@@ -762,6 +807,10 @@ class ApplicationController {
     } catch (_) {}
     throw new Error('Voice operation rejected from an untrusted window.');
   };
+  ipcMain.handle('get-assistant-mode', () => assistantMode.snapshot());
+  ipcMain.handle('set-assistant-mode', (_event, mode) => this.setAssistantMode(mode));
+  ipcMain.handle('force-send-speech', () => this.forceSendSpeech());
+  ipcMain.handle('set-audio-preset', (_event, preset) => actionController.execute('audioPreset', { preset }));
   ipcMain.handle("take-screenshot", (_event, options) => this.queueScreenshot(options || {}));
   ipcMain.handle("submit-screenshots", () => this.triggerScreenshotOCR());
   ipcMain.handle("show-answer-windows", () => { windowManager.showAnswerWindows(); return { success: true }; });
@@ -800,6 +849,7 @@ class ApplicationController {
     ipcMain.on('audio-capture-error', (event, data) => {
       try { requireVoiceWindow(event, 'main'); } catch (_) { return; }
       const message = data?.message || data;
+      speechService.lastCaptureError = String(message).slice(0, 300);
       logger.warn('Computer audio capture interrupted', { reason: String(message).slice(0, 300) });
       listeningController.reportCaptureError(data?.sessionId, message);
     });
@@ -919,8 +969,7 @@ class ApplicationController {
     });
 
     ipcMain.handle("clear-session-memory", () => {
-      sessionManager.clear();
-      windowManager.broadcastToAllWindows("session-cleared");
+      this.startNewConversation();
       return { success: true };
     });
 
@@ -1069,7 +1118,9 @@ class ApplicationController {
       return this.getMobileConnectionSettings();
     });
     ipcMain.handle('delete-conversation-history', () => {
+      this.assertHistoryIdle();
       const conversation = conversationStore.deleteAllHistory();
+      this.clearPendingSpeech();
       sessionManager.clear();
       conversationEvents.publish('conversation.created', conversation);
       return this.getMobileConnectionSettings();
@@ -1305,6 +1356,7 @@ class ApplicationController {
   }
 
   toggleSpeechRecognition() {
+    if (this._sendingSpeech) return Promise.resolve(listeningController.getStatus());
     return listeningController.toggle().catch(error => {
       logger.error('Listening toggle failed', { error: error.message });
       throw error;
@@ -1313,8 +1365,7 @@ class ApplicationController {
 
   clearSessionMemory() {
     try {
-      sessionManager.clear();
-      windowManager.broadcastToAllWindows("session-cleared");
+      this.startNewConversation();
       logger.info("Session memory cleared via global shortcut");
     } catch (error) {
       logger.error("Error clearing session memory:", error);
@@ -1417,10 +1468,10 @@ class ApplicationController {
     }
   }
 
-  async triggerScreenshotOCR(skill) {
+  async triggerScreenshotOCR(skill, conversationId = conversationStore.currentConversationId) {
     if (!this.isReady) return { success: false, error: 'Application is not ready.' };
     try {
-      return await this.screenshots.submit(batch => this.analyzeScreenshots(batch, { skill }));
+      return await this.screenshots.submit(batch => this.analyzeScreenshots(batch, { skill, conversationId }));
     } catch (error) {
       windowManager.broadcastToAllWindows('screenshot-status', { text: error.message, error: true });
       windowManager.showLLMResponse(`Screenshot request failed: ${error.message}\n\nAny queued screenshots have been kept. Use Send to AI to retry.`);
@@ -1445,6 +1496,7 @@ class ApplicationController {
       if (!turn) {
         turn = conversationStore.createTurn({
           source: 'screenshot',
+          conversationId: options.conversationId || conversationStore.currentConversationId,
           content: `Screenshot request · ${captures.length} image${captures.length === 1 ? '' : 's'}`,
           skill: requestSkill,
           contextMode: options.contextMode || 'current'
@@ -1457,7 +1509,7 @@ class ApplicationController {
       question = question || turn.user.content;
       stream = this.createStreamPersistence(turn.assistant.id);
       windowManager.showLLMLoading();
-      windowManager.broadcastToAllWindows('screenshot-status', { text: `Sending ${captures.length} screenshot(s) to ${llmService.imageModel}…` });
+      windowManager.broadcastToAllWindows('screenshot-status', { text: `Sending ${captures.length} screenshot(s) to ${assistantMode.snapshot().model}…` });
 
       // Use image directly with LLM and active skill; do not send chat messages here
       const sessionHistory = options.contextMode === 'fresh' ? { recent: [] } : sessionManager.getOptimizedHistory();
@@ -1472,28 +1524,23 @@ class ApplicationController {
         skill: this.activeSkill
       });
 
-      const llmResult = await llmService.processImageWithSkillStream(
-        captures,
-        'image/png',
-        requestSkill,
-        requestSkill === 'general_qa' ? this.mobileHistory(turn, options.contextMode) : sessionHistory.recent,
-        needsProgrammingLanguage ? this.codingLanguage : null,
+      const llmResult = await llmService.processConversation(turn, { skill: requestSkill, programmingLanguage: needsProgrammingLanguage ? this.codingLanguage : null },
         (delta) => {
           stream.delta(delta);
-          conversationEvents.publish('response.delta', { messageId: turn.assistant.id, delta });
+          conversationEvents.publish('response.delta', { conversationId: turn.user.conversationId, messageId: turn.assistant.id, delta });
+          if (turn.user.conversationId !== conversationStore.currentConversationId) return;
           windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
             messageId,
             delta
           });
-        },
-        question,
-        options.contextMode !== 'fresh'
+        }
       );
       stream.finish();
       conversationStore.completeAssistant(turn.assistant.id, llmResult.response, llmResult.metadata);
       conversationEvents.publish('response.completed', conversationStore.getMessage(turn.assistant.id));
+      if (turn.user.conversationId !== conversationStore.currentConversationId) return llmResult;
       llmResult.metadata = { ...llmResult.metadata, messageId };
-      windowManager.broadcastToAllWindows('screenshot-status', { text: `Answered using ${captures.length} screenshot(s) · ${llmService.imageModel}` });
+      windowManager.broadcastToAllWindows('screenshot-status', { text: `Answered using ${captures.length} screenshot(s) · ${assistantMode.snapshot().model}` });
 
       sessionManager.addModelResponse(llmResult.response, {
         skill: this.activeSkill,
@@ -1564,15 +1611,12 @@ class ApplicationController {
       });
       windowManager.showLLMLoading();
 
-      const llmResult = await llmService.processTextWithSkillStream(
-        text,
-        requestSkill,
-        requestSkill === 'general_qa' ? this.mobileHistory(turn, options.contextMode) : sessionHistory.recent,
-        needsProgrammingLanguage ? this.codingLanguage : null,
+      const llmResult = await llmService.processConversation(turn, { skill: requestSkill, programmingLanguage: needsProgrammingLanguage ? this.codingLanguage : null },
         (delta) => {
           if (requestSkill === 'general_qa' && !firstToken) { firstToken = true; logger.info('Mobile response first token', { elapsedMs: Date.now() - requestStarted }); }
           stream.delta(delta);
-          conversationEvents.publish('response.delta', { messageId: turn.assistant.id, delta });
+          conversationEvents.publish('response.delta', { conversationId: turn.user.conversationId, messageId: turn.assistant.id, delta });
+          if (turn.user.conversationId !== conversationStore.currentConversationId) return;
           windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
             messageId,
             delta
@@ -1582,6 +1626,7 @@ class ApplicationController {
       stream.finish();
       conversationStore.completeAssistant(turn.assistant.id, llmResult.response, llmResult.metadata);
       conversationEvents.publish('response.completed', conversationStore.getMessage(turn.assistant.id));
+      if (turn.user.conversationId !== conversationStore.currentConversationId) return llmResult;
       if (requestSkill === 'general_qa') logger.info('Mobile response completed', { elapsedMs: Date.now() - requestStarted });
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
@@ -1645,89 +1690,22 @@ class ApplicationController {
    * line from producing two separate, slow answers.
    */
   handleTranscriptionFragment(text, metadata = {}) {
-    const fragment = (text || "").trim();
-    if (!fragment) {
-      return;
-    }
-
-    // Route speech UI events according to the user's response-target setting.
-    sessionManager.addUserInput(fragment, 'speech');
-    const mainWindow = windowManager.getWindow('main');
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('transcription-received', { text: fragment });
-    }
-    this.sendToVoiceResponseWindows("transcription-received", { text: fragment });
-
-    if (metadata.committed) {
-      // Live transcription already waited for 1.5 seconds of actual silence.
-      this._voiceQuestionQueue.push(fragment);
-      this.dispatchCoalescedUtterance();
-      return;
-    }
-
-    this._utteranceBuffer = this._utteranceBuffer
-      ? `${this._utteranceBuffer} ${fragment}`
-      : fragment;
-
-    if (this._utteranceTimer) {
-      clearTimeout(this._utteranceTimer);
-      this._utteranceTimer = null;
-    }
-
-    // Manual capture emits one complete transcript after the user presses stop,
-    // so no debounce/coalescing delay is needed.
-    if (speechService.isManualCaptureMode()) {
-      this.dispatchCoalescedUtterance();
-      return;
-    }
-
-    this._utteranceTimer = setTimeout(() => {
-      this._utteranceTimer = null;
-      this.dispatchCoalescedUtterance();
-    }, this._utteranceCoalesceMs);
+    if (metadata.conversationId && metadata.conversationId !== conversationStore.currentConversationId) return;
+    if (!pendingUtterance.accept(metadata)) return;
+    const fragment = String(text || '').trim();
+    if (!fragment) return;
+    this._utteranceBuffer = pendingUtterance.merge([this._utteranceBuffer, fragment]);
+    this.sendToVoiceResponseWindows('transcription-received', { text: fragment });
+    conversationEvents.publish('status.updated', { utterance: { pending: true, state: 'Recording - press Send when finished' } });
+    // No silence timer and no automatic assistant request. Only Send submits.
   }
 
-  /**
-   * Send the coalesced utterance to the LLM. If a previous dispatch is still
-   * running, leave the buffer intact and let that dispatch's completion pick it
-   * up — so we never pile up overlapping requests for the same person talking.
-   */
-  async dispatchCoalescedUtterance() {
-    if (this._utteranceDispatchInFlight) {
-      return;
-    }
-    if (!this._voiceQuestionQueue.length && this._utteranceTimer) return;
-    const queued = this._voiceQuestionQueue.shift();
-    const combined = queued || this._utteranceBuffer.trim();
-    if (!combined) {
-      return;
-    }
-    if (!queued) this._utteranceBuffer = "";
-    this._utteranceDispatchInFlight = true;
-
-    try {
-      const sessionHistory = sessionManager.getOptimizedHistory();
-      await this.processTranscriptionWithLLM(combined, sessionHistory);
-    } catch (error) {
-      logger.error("Failed to process transcription with LLM", {
-        error: error.message,
-        text: combined.substring(0, 100)
-      });
-    } finally {
-      this._utteranceDispatchInFlight = false;
-      // Anything that arrived while we were busy gets answered now.
-      if (this._voiceQuestionQueue.length || (this._utteranceBuffer.trim() && !this._utteranceTimer)) {
-        this.dispatchCoalescedUtterance();
-      }
-    }
-  }
-
-  async processTranscriptionWithLLM(text, sessionHistory) {
+  async processTranscriptionWithLLM(text, sessionHistory, suppliedTurn = null) {
     // Hoisted so the catch block can tie a fallback answer to the same UI
     // bubble the streaming start event created; otherwise a total failure
     // leaves an empty streamed bubble stranded next to the fallback message.
     let messageId = null;
-    let turn = null;
+    let turn = suppliedTurn;
     let stream = null;
     try {
       // Validate input text
@@ -1740,14 +1718,8 @@ class ApplicationController {
       }
 
       const cleanText = text.trim();
-      if (cleanText.length < 2) {
-        logger.debug("Skipping LLM processing for very short transcription", {
-          text: cleanText
-        });
-        return;
-      }
 
-      turn = conversationStore.createTurn({ source: 'speech', content: cleanText, skill: this.activeSkill, contextMode: 'current' });
+      turn ||= conversationStore.createTurn({ source: 'speech', content: cleanText, skill: this.activeSkill, contextMode: 'current', metadata: { utteranceId: pendingUtterance.createId() } });
       conversationEvents.publish('message.created', turn.user);
       conversationEvents.publish('response.started', turn.assistant);
       stream = this.createStreamPersistence(turn.assistant.id);
@@ -1775,14 +1747,11 @@ class ApplicationController {
       if (this.shouldShowVoiceOverlay()) {
         windowManager.showLLMLoading();
       }
-      const llmResult = await llmService.processTranscriptionWithIntelligentResponseStream(
-        cleanText,
-        this.activeSkill,
-        sessionHistory.recent,
-        needsProgrammingLanguage ? this.codingLanguage : null,
+      const llmResult = await llmService.processConversation(turn, { skill: this.activeSkill, programmingLanguage: needsProgrammingLanguage ? this.codingLanguage : null },
         (delta) => {
           stream.delta(delta);
-          conversationEvents.publish('response.delta', { messageId: turn.assistant.id, delta });
+          conversationEvents.publish('response.delta', { conversationId: turn.user.conversationId, messageId: turn.assistant.id, delta });
+          if (turn.user.conversationId !== conversationStore.currentConversationId) return;
           this.sendToVoiceResponseWindows("transcription-llm-response-chunk", {
             messageId,
             delta
@@ -1792,6 +1761,7 @@ class ApplicationController {
       stream.finish();
       conversationStore.completeAssistant(turn.assistant.id, llmResult.response, llmResult.metadata);
       conversationEvents.publish('response.completed', conversationStore.getMessage(turn.assistant.id));
+      if (turn.user.conversationId !== conversationStore.currentConversationId) return llmResult;
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
       sessionManager.addQATurn(cleanText, llmResult.response);
@@ -1847,8 +1817,9 @@ class ApplicationController {
           fallbackResult.metadata = { ...fallbackResult.metadata, messageId };
         }
         if (turn?.assistant?.id) {
-          conversationStore.completeAssistant(turn.assistant.id, fallbackResult.response, { ...fallbackResult.metadata, fallbackReason: error.message });
-          conversationEvents.publish('response.completed', conversationStore.getMessage(turn.assistant.id));
+          conversationStore.failAssistant(turn.assistant.id, error.message, fallbackResult.response);
+          conversationEvents.publish('response.failed', conversationStore.getMessage(turn.assistant.id));
+          if (turn.user.conversationId !== conversationStore.currentConversationId) return fallbackResult;
         }
 
         sessionManager.addModelResponse(fallbackResult.response, {
@@ -2055,6 +2026,8 @@ class ApplicationController {
     // using. Empty strings are returned rather than skipped so the UI can
     // distinguish "unset" from "stale value from a previous load".
     return {
+      audioPreset: speechService.audioPreset || 'standard',
+      assistantMode: assistantMode.snapshot(),
       codingLanguage: this.codingLanguage || "java",
       activeSkill: this.activeSkill || "dsa",
       appIcon: this.appIcon || "terminal",

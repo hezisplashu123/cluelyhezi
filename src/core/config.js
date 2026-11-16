@@ -41,7 +41,7 @@ class ConfigManager {
       llm: {
         openai: {
           model: 'gpt-6-luna',
-          imageModel: 'gpt-5.4-mini',
+          imageModel: 'gpt-6-luna',
           timeout: 60000,
           fallbackEnabled: true,
           enableFallbackMethod: false,

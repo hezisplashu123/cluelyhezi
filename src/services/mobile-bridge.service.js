@@ -126,6 +126,23 @@ class MobileBridge {
       const isRead = req.method === 'GET';
       this.limit(req, `${isRead ? 'read' : 'write'}:${device.id}`, isRead ? 600 : 180, 60_000);
 
+      if (req.method === 'POST' && url.pathname === '/api/v1/attachments') {
+        const upload = await this.imageUpload(req);
+        return this.json(res, 201, { success: true, data: await this.store.uploadImage(upload.buffer, { ...upload, deviceId: device.id }) });
+      }
+      let imageMatch = url.pathname.match(/^\/api\/v1\/attachments\/([^/]+)\/(thumbnail|original)$/);
+      if (req.method === 'GET' && imageMatch) {
+        const attachment = this.store.getAttachment(decodeURIComponent(imageMatch[1]), device.id);
+        if (!attachment) return this.json(res, 404, { success: false, error: { message: 'Attachment not found.' } });
+        const fs = require('fs');
+        const bytes = imageMatch[2] === 'original' ? fs.readFileSync(attachment.local_path)
+          : await require('sharp')(attachment.local_path, { limitInputPixels: 24000000 }).rotate().resize({ width: 400, height: 400, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 75 }).toBuffer();
+        res.setHeader('Content-Type', imageMatch[2] === 'original' ? attachment.mime_type : 'image/jpeg');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Cache-Control', 'private, no-store');
+        return res.end(bytes);
+      }
+
       if (req.method === 'GET' && url.pathname === '/api/v1/state') return this.ok(res, await this.stateProvider());
       if (req.method === 'GET' && url.pathname === '/api/v1/voice-profile') return this.ok(res, this.verification?.getStatus() || { profile: 'not_set_up', model: 'unavailable', filterEnabled: false });
       if (req.method === 'GET' && url.pathname === '/api/v1/displays') return this.ok(res, (await this.stateProvider()).displays);
@@ -137,17 +154,27 @@ class MobileBridge {
         const cursor = this.store.decodeCursor(url.searchParams.get('cursor'));
         return this.ok(res, this.store.getMessages(decodeURIComponent(match[1]), { limit: url.searchParams.get('limit'), cursor }));
       }
+      match = url.pathname.match(/^\/api\/v1\/conversations\/([^/]+)\/context$/);
+      if (req.method === 'POST' && match) {
+        const body = await this.body(req);
+        new (require('./conversation-context.service').ConversationContext)(this.store).pin(decodeURIComponent(match[1]), body.facts);
+        return this.ok(res, { facts: body.facts });
+      }
       match = url.pathname.match(/^\/api\/v1\/jobs\/([^/]+)$/);
       if (req.method === 'GET' && match) return this.ok(res, this.stateProvider.getJob?.(decodeURIComponent(match[1])) || null);
 
       const routes = {
         '/api/v1/actions/capture': 'capture', '/api/v1/actions/submit': 'submit', '/api/v1/actions/clear-queue': 'clearQueue',
         '/api/v1/actions/select-target': 'selectTarget', '/api/v1/actions/set-crop': 'setCrop',
-        '/api/v1/actions/new-conversation': 'newConversation', '/api/v1/actions/select-conversation': 'selectConversation', '/api/v1/actions/audio-source': 'audioSource', '/api/v1/actions/computer-microphone': 'computerMicrophone', '/api/v1/messages': 'sendMessage'
+        '/api/v1/actions/new-conversation': 'newConversation', '/api/v1/actions/select-conversation': 'selectConversation', '/api/v1/actions/audio-source': 'audioSource', '/api/v1/actions/computer-microphone': 'computerMicrophone', '/api/v1/messages': 'sendMessage',
+        '/api/v1/actions/send-speech': 'forceSend', '/api/v1/actions/assistant-mode': 'setMode', '/api/v1/actions/force-send': 'forceSend',
+        '/api/v1/actions/audio-preset': 'audioPreset', '/api/v1/actions/delete-conversation': 'deleteConversation',
+        '/api/v1/actions/clear-history': 'clearHistory'
       };
       if (req.method === 'POST' && routes[url.pathname]) {
         const body = await this.body(req);
         body.mobileOrigin = true;
+        body.deviceId = device.id;
         const kind = routes[url.pathname];
         const scopedId = body.requestId ? `${device.id}:${body.requestId}` : null;
         const cached = this.store.getIdempotent(scopedId, kind);
@@ -202,6 +229,32 @@ class MobileBridge {
     for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY) throw Object.assign(new Error('Request body is too large.'), { statusCode: 413 }); chunks.push(chunk); }
     if (!chunks.length) return {};
     try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (_) { throw new Error('Invalid JSON body.'); }
+  }
+
+  async imageUpload(req) {
+    const { MAX_IMAGE_BYTES } = require('./image-validation.service');
+    if (Number(req.headers['content-length']) > MAX_IMAGE_BYTES + 16384) throw new Error('Image upload is too large.');
+    return new Promise((resolve, reject) => {
+      let parser;
+      try { parser = require('busboy')({ headers: req.headers, limits: { fileSize: MAX_IMAGE_BYTES, files: 1, fields: 2, fieldSize: 200, parts: 4 } }); }
+      catch (_) { reject(new Error('Use multipart/form-data for image uploads.')); return; }
+      const fields = {}; const chunks = []; let invalid = false; let count = 0; let total = 0;
+      parser.on('field', (name, value, info) => { if (!['conversationId','requestId'].includes(name) || fields[name] || info.valueTruncated) invalid = true; fields[name] = value; });
+      parser.on('file', (name, file) => {
+        count++; if (name !== 'image') invalid = true;
+        file.on('limit', () => { invalid = true; });
+        file.on('data', chunk => { total += chunk.length; if (total <= MAX_IMAGE_BYTES) chunks.push(chunk); else invalid = true; });
+        file.on('error', reject);
+      });
+      for (const event of ['filesLimit','fieldsLimit','partsLimit']) parser.on(event, () => { invalid = true; });
+      parser.on('error', reject);
+      req.on('aborted', () => { parser.destroy(); reject(new Error('Upload interrupted. Retry with the same upload ID.')); });
+      parser.on('close', () => {
+        if (invalid || count !== 1 || !total || !fields.conversationId || !fields.requestId) reject(new Error('Upload one PNG, JPEG, or WebP image up to 10 MB with conversationId and requestId.'));
+        else resolve({ ...fields, buffer: Buffer.concat(chunks) });
+      });
+      req.pipe(parser);
+    });
   }
 
   limit(req, key, max, windowMs) {

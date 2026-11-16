@@ -28,6 +28,7 @@ class ConversationStore {
     this.db = new DatabaseSync(dbPath);
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;');
     this.migrate();
+    this.cleanupUploads();
     this.currentConversationId = this.getMeta('current_conversation_id');
     if (!this.currentConversationId || !this.getConversation(this.currentConversationId)) {
       this.currentConversationId = this.createConversation({ title: 'Conversation' }).id;
@@ -68,6 +69,26 @@ class ConversationStore {
       CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
       INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, datetime('now'));
     `);
+    if (!this.db.prepare('SELECT 1 FROM schema_migrations WHERE version=2').get()) this.transaction(() => {
+      this.db.exec(`ALTER TABLE attachments RENAME TO attachments_v1;
+        CREATE TABLE attachments(
+          id TEXT PRIMARY KEY, message_id TEXT, conversation_id TEXT NOT NULL,
+          local_path TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL,
+          content_hash TEXT, created_at TEXT NOT NULL, metadata_json TEXT,
+          owner_device_id TEXT, upload_key TEXT,
+          FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
+          FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+          UNIQUE(owner_device_id, upload_key));
+        INSERT INTO attachments(id,message_id,conversation_id,local_path,mime_type,size,content_hash,created_at,metadata_json)
+          SELECT a.id,a.message_id,m.conversation_id,a.local_path,a.mime_type,a.size,a.content_hash,a.created_at,a.metadata_json
+          FROM attachments_v1 a JOIN messages m ON m.id=a.message_id;
+        DROP TABLE attachments_v1;
+        CREATE INDEX idx_attachments_message ON attachments(message_id);
+        CREATE TABLE conversation_context(conversation_id TEXT PRIMARY KEY, summary TEXT NOT NULL DEFAULT '',
+          through_rowid INTEGER NOT NULL DEFAULT 0, pinned_json TEXT NOT NULL DEFAULT '[]',
+          FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
+        INSERT INTO schema_migrations VALUES(2,datetime('now'));`);
+    });
   }
 
   markInterrupted() {
@@ -110,7 +131,7 @@ class ConversationStore {
   }
 
   createTurn({ conversationId = this.currentConversationId, source, content, skill = null,
-    originalMessageId = null, contextMode = null, metadata = null } = {}) {
+    originalMessageId = null, contextMode = null, metadata = null, attachmentIds = [], ownerDeviceId = null } = {}) {
     const turnId = crypto.randomUUID();
     const userId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
@@ -123,6 +144,13 @@ class ConversationStore {
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(assistantId, conversationId, turnId, 'assistant', source, '', assistantTimestamp, assistantTimestamp, 'pending', userId, originalMessageId, skill, contextMode, json(metadata));
       this.db.prepare('UPDATE messages SET related_message_id=? WHERE id=?').run(assistantId, userId);
       this.db.prepare('UPDATE conversations SET updated_at=?, skill=COALESCE(?,skill) WHERE id=?').run(timestamp, skill, conversationId);
+      this.db.prepare("UPDATE conversations SET title=? WHERE id=? AND title='Conversation'").run((content || 'Image question').slice(0, 80), conversationId);
+      if (!Array.isArray(attachmentIds) || attachmentIds.length > 4 || new Set(attachmentIds).size !== attachmentIds.length) throw new Error('Choose up to four different images.');
+      for (const id of attachmentIds) {
+        const attachment = this.db.prepare('SELECT * FROM attachments WHERE id=?').get(id);
+        if (!attachment || attachment.conversation_id !== conversationId || attachment.owner_device_id !== ownerDeviceId || attachment.message_id) throw new Error('Attachment is unavailable or belongs to another message or device.');
+        this.db.prepare('UPDATE attachments SET message_id=? WHERE id=?').run(userId, id);
+      }
     });
     return { turnId, user: this.getMessage(userId), assistant: this.getMessage(assistantId) };
   }
@@ -146,10 +174,11 @@ class ConversationStore {
   }
 
   addAttachments(messageId, captures) {
-    const insert = this.db.prepare(`INSERT INTO attachments(id,message_id,local_path,mime_type,size,content_hash,created_at,metadata_json)
-      VALUES(?,?,?,?,?,?,?,?)`);
+    const conversationId = this.getMessage(messageId)?.conversationId;
+    const insert = this.db.prepare(`INSERT INTO attachments(id,message_id,conversation_id,local_path,mime_type,size,content_hash,created_at,metadata_json)
+      VALUES(?,?,?,?,?,?,?,?,?)`);
     const result = [];
-    this.transaction(() => {
+    try { this.transaction(() => {
       for (const capture of captures) {
         const id = crypto.randomUUID();
         const mimeType = capture.mimeType || 'image/png';
@@ -157,10 +186,10 @@ class ConversationStore {
         const target = path.join(this.captureDir, `${id}${extension}`);
         fs.writeFileSync(target, capture.imageBuffer, { flag: 'wx' });
         const hash = crypto.createHash('sha256').update(capture.imageBuffer).digest('hex');
-        insert.run(id, messageId, target, mimeType, capture.imageBuffer.length, hash, now(), json(capture.metadata));
         result.push({ id, messageId, localPath: target, mimeType, size: capture.imageBuffer.length, contentHash: hash });
+        insert.run(id, messageId, conversationId, target, mimeType, capture.imageBuffer.length, hash, now(), json({ ...capture.metadata, ...capture.metadata?.dimensions }));
       }
-    });
+    }); } catch (error) { for (const item of result) fs.rmSync(item.localPath, { force: true }); throw error; }
     return result;
   }
 
@@ -171,6 +200,68 @@ class ConversationStore {
       mimeType: row.mime_type, size: row.size, contentHash: row.content_hash,
       metadata: parseJson(row.metadata_json), exists: fs.existsSync(row.local_path)
     }));
+  }
+
+  async uploadImage(buffer, { conversationId, deviceId, requestId }) {
+    if (!this.getConversation(conversationId)) throw new Error('Conversation not found.');
+    if (typeof requestId !== 'string' || !requestId || requestId.length > 200) throw new Error('Upload request ID is required.');
+    const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+    const existing = this.db.prepare('SELECT * FROM attachments WHERE owner_device_id=? AND upload_key=?').get(deviceId, requestId);
+    if (existing) {
+      if (existing.content_hash !== hash || existing.conversation_id !== conversationId) throw new Error('Upload key was already used for different content.');
+      return this.publicAttachment(existing);
+    }
+    const image = await require('./image-validation.service').validate(buffer);
+    // Validation yields; check again before writing to handle concurrent retries.
+    const repeated = this.db.prepare('SELECT * FROM attachments WHERE owner_device_id=? AND upload_key=?').get(deviceId, requestId);
+    if (repeated) {
+      if (repeated.content_hash !== hash || repeated.conversation_id !== conversationId) throw new Error('Upload key conflict.');
+      return this.publicAttachment(repeated);
+    }
+    const id = crypto.randomUUID(); const target = path.join(this.captureDir, `${id}.${image.format}`);
+    fs.writeFileSync(target, buffer, { flag: 'wx' });
+    try {
+      this.db.prepare(`INSERT INTO attachments(id,conversation_id,local_path,mime_type,size,content_hash,created_at,metadata_json,owner_device_id,upload_key) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, conversationId, target, image.mimeType, buffer.length, hash, now(), json({ width: image.width, height: image.height }), deviceId, requestId);
+    } catch (error) { fs.rmSync(target, { force: true }); throw error; }
+    return this.publicAttachment(this.db.prepare('SELECT * FROM attachments WHERE id=?').get(id));
+  }
+
+  publicAttachment(row) {
+    return { id: row.id, messageId: row.message_id, conversationId: row.conversation_id,
+      mimeType: row.mime_type, size: row.size, contentHash: row.content_hash, createdAt: row.created_at,
+      ...parseJson(row.metadata_json) };
+  }
+
+  getAttachment(id, deviceId) {
+    const row = this.db.prepare('SELECT * FROM attachments WHERE id=?').get(id);
+    // Paired devices share chat history; staged uploads remain private to their uploader.
+    if (!row || (!row.message_id && row.owner_device_id !== deviceId)) return null;
+    return row;
+  }
+
+  cleanupUploads() {
+    const stale = this.db.prepare("SELECT * FROM attachments WHERE message_id IS NULL AND created_at < ?").all(new Date(Date.now() - 86400000).toISOString());
+    for (const row of stale) { fs.rmSync(row.local_path, { force: true }); this.db.prepare('DELETE FROM attachments WHERE id=?').run(row.id); }
+    const known = new Set(this.db.prepare('SELECT local_path FROM attachments').all().map(r => r.local_path));
+    for (const name of fs.readdirSync(this.captureDir)) {
+      const target = path.join(this.captureDir, name);
+      if (!known.has(target) && fs.statSync(target).isFile()) fs.rmSync(target, { force: true });
+    }
+  }
+
+  selectConversation(id) {
+    if (!this.getConversation(id)) throw new Error('Conversation not found.');
+    this.currentConversationId = id; this.setMeta('current_conversation_id', id);
+    return this.getConversation(id);
+  }
+
+  deleteConversation(id) {
+    const files = this.db.prepare('SELECT local_path FROM attachments WHERE conversation_id=?').all(id);
+    this.db.prepare('DELETE FROM conversations WHERE id=?').run(id);
+    for (const row of files) fs.rmSync(row.local_path, { force: true });
+    if (this.currentConversationId === id) return this.createConversation();
+    return this.getConversation(this.currentConversationId);
   }
 
   getMessage(id) {
@@ -249,7 +340,8 @@ class ConversationStore {
       createdAt: row.created_at, updatedAt: row.updated_at, status: row.status,
       relatedMessageId: row.related_message_id, originalMessageId: row.original_message_id,
       model: row.model, skill: row.skill, contextMode: row.context_mode,
-      error: row.error, metadata: parseJson(row.metadata_json), attachmentCount
+      error: row.error, metadata: parseJson(row.metadata_json), attachmentCount,
+      attachments: this.db.prepare('SELECT * FROM attachments WHERE message_id=? ORDER BY rowid').all(row.id).map(item => this.publicAttachment(item))
     };
   }
 

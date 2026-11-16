@@ -851,8 +851,50 @@ Remember: Answer the actual spoken question using the available conversation con
   }
 
   getReasoningEffort(model) {
-    if (model === 'gpt-6-luna') return 'none';
-    return model === 'gpt-5-nano' ? 'minimal' : 'low';
+    return require('./assistant-mode.service').snapshot().reasoningEffort;
+  }
+
+  processConversation(turn, options = {}, onDelta) {
+    this.conversationQueues ||= new Map();
+    const id = turn.user.conversationId;
+    const next = (this.conversationQueues.get(id) || Promise.resolve()).catch(() => {}).then(() => this._processConversation(turn, options, onDelta));
+    this.conversationQueues.set(id, next);
+    void next.finally(() => { if (this.conversationQueues.get(id) === next) this.conversationQueues.delete(id); }).catch(() => {});
+    return next;
+  }
+
+  async _processConversation(turn, options = {}, onDelta) {
+    if (!this.isInitialized) throw new Error('Add your OpenAI API key in Settings.');
+    const store = require('./conversation-store.service');
+    const mode = require('./assistant-mode.service').snapshot();
+    const { ConversationContext } = require('./conversation-context.service');
+    const request = new ConversationContext(store).build(turn, { ...options, mode });
+    const startedAt = new Date().toISOString(); const started = Date.now(); let firstTokenMs = null;
+    const metadata = { ...mode, startedAt, conversationId: turn.user.conversationId, streamed: true,
+      instructionsHash: require('crypto').createHash('sha256').update(request.instructions).digest('hex'),
+      resumeLoaded: request.resumeLoaded, resumeSourceHash: request.resumeSourceHash };
+    store.db.prepare('UPDATE messages SET model=?,metadata_json=? WHERE id IN (?,?)').run(mode.model, JSON.stringify(metadata), turn.user.id, turn.assistant.id);
+    const { modeSnapshot, conversationId, resumeLoaded, resumeSourceHash, ...body } = request;
+    let response = ''; let completed = false;
+    try {
+      const stream = await this.client.responses.create({ ...body, stream: true });
+      for await (const event of stream) {
+        if (event.type === 'response.output_text.delta') {
+          if (firstTokenMs === null) firstTokenMs = Date.now() - started;
+          response += event.delta; onDelta?.(event.delta);
+        } else if (event.type === 'response.completed') completed = true;
+        else if (['error','response.failed','response.incomplete'].includes(event.type)) throw new Error(event.message || event.response?.error?.message || 'Model response failed or incomplete.');
+      }
+      if (!completed || !response) throw new Error('Model stream ended before completion.');
+      response = await this.ensureCodeAnnotations(response, { model: mode.model, reasoningEffort: mode.reasoningEffort });
+      return { response, metadata: { ...metadata, firstTokenMs, processingTime: Date.now()-started, completedAt: new Date().toISOString(), providerError: null } };
+    } catch (error) {
+      if ([400,403,404].includes(error.status) && /model|reasoning|effort|access/i.test(error.message || '')) {
+        error.message = `${mode.model} with ${mode.reasoningEffort} reasoning could not be used. Check model access and reasoning support for the configured OpenAI project in Settings. No model was substituted. Provider detail: ${error.message}`;
+      }
+      store.db.prepare('UPDATE messages SET metadata_json=? WHERE id=?').run(JSON.stringify({ ...metadata, firstTokenMs, processingTime: Date.now()-started, providerError: error.message }), turn.assistant.id);
+      throw error;
+    }
   }
 
   buildOpenAIRequest(request) {
@@ -868,7 +910,8 @@ Remember: Answer the actual spoken question using the available conversation con
       instructions: [
         request.systemInstruction?.parts?.map(p => p.text || '').join('\n'),
         resumePrompt,
-        require('../core/code-presentation')
+        require('../core/code-presentation'),
+        require('../core/plain-text-instructions')
       ].filter(Boolean).join('\n\n'),
       input: contents.map(content => {
         const assistant = content.role === 'model' || content.role === 'assistant';
@@ -923,7 +966,7 @@ Remember: Answer the actual spoken question using the available conversation con
       const result = await this.client.responses.create({
         model: request.model || this.model,
         store: false,
-        reasoning: { effort: this.getReasoningEffort(request.model || this.model) },
+        reasoning: { effort: request.reasoningEffort || this.getReasoningEffort(request.model || this.model) },
         instructions: `For every requested source line, write a short phrase the user can SAY aloud just before typing that line, as if explaining their solution to another person. At most 12 words per phrase. Explain WHY this step helps solve this particular problem, not HOW the programming language works.
 Do not narrate syntax or scaffolding at all. Do not mention classes, methods, functions, namespaces, public/private access, types, imports, libraries, declarations, braces, semicolons, indentation, or making names available. Naming the data structure or algorithm is useful; naming grammar is not.
 For setup or structural lines, briefly recap the relevant algorithmic plan or logical phase instead of naming the language construct. For example, setup for Two Sum can be "I'll find each number's missing partner with fast lookups." A closing structural line can be "That completes checking the current candidate." Do not say "I organize a class" or "I expose a method".

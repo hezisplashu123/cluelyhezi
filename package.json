@@ -13,7 +13,7 @@
     "test-mobile-services": "node scripts/test-mobile-services.cjs",
     "capture-diagnostic": "node scripts/start-electron.cjs --script scripts/check-screen-capture.cjs",
     "test-mobile-main": "node scripts/start-electron.cjs --script scripts/test-mobile-main.cjs",
-    "test": "node scripts/test-screenshot-queue.cjs && node scripts/test-resume-context.cjs && node scripts/test-audio-routing.cjs && node scripts/test-web-primitives.cjs && node scripts/test-mobile-services.cjs && node scripts/test-listening-toggle.cjs",
+    "test": "node scripts/test-screenshot-queue.cjs && node scripts/test-resume-context.cjs && node scripts/test-audio-routing.cjs && node scripts/test-web-primitives.cjs && node scripts/test-mobile-services.cjs && node scripts/test-listening-toggle.cjs && node scripts/test-openai.cjs && node scripts/test-live-transcription.cjs && node scripts/test-conversation-pipeline.cjs && node scripts/test-force-send.cjs && node scripts/test-swe-behavioral.cjs && node scripts/test-case-mode.cjs && node scripts/test-plain-response.cjs && node scripts/test-mobile-image-upload.cjs",
     "test-listening": "node scripts/test-listening-toggle.cjs",
     "test-speech": "node scripts/test-speech.js",
     "test-resume-context": "node scripts/test-resume-context.cjs",
@@ -27,7 +27,13 @@
     "clean": "node scripts/clean.cjs",
     "rebuild": "npm run clean && npm run build",
     "release": "npm run clean && npm run build:all",
-    "postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps"
+    "postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps",
+    "test:live-conversation": "node scripts/check-live-conversation.cjs",
+    "test:swe": "node scripts/test-swe-behavioral.cjs",
+    "evaluate:swe": "node scripts/evaluate-swe-behavioral.cjs",
+    "test:case": "node scripts/test-case-mode.cjs",
+    "test:live-case": "node scripts/check-live-case-mode.cjs",
+    "test:plain-text": "node scripts/test-plain-response.cjs"
   },
   "author": {
     "name": "TechyCSR",
@@ -42,6 +48,7 @@
   "dependencies": {
     "@fortawesome/fontawesome-free": "^7.2.0",
     "@google/genai": "^2.9.0",
+    "busboy": "^1.6.0",
     "dotenv": "^16.3.1",
     "markdown": "^0.5.0",
     "marked": "^15.0.12",
@@ -49,6 +56,7 @@
     "node-record-lpcm16": "^1.0.1",
     "openai": "^7.39.0",
     "prismjs": "^1.30.0",
+    "sharp": "^0.35.5",
     "winston": "^3.17.0",
     "winston-daily-rotate-file": "^4.7.1",
     "ws": "^8.22.0"
@@ -84,8 +92,8 @@
       "scripts/transcribe-whisper.py",
       "scripts/whisper_worker.py",
       "scripts/mouse-routing.ps1",
-      "scripts/capture-window-metadata.ps1"
-      ,"scripts/backtick-key-listener.ps1"
+      "scripts/capture-window-metadata.ps1",
+      "scripts/backtick-key-listener.ps1"
     ],
     "mac": {
       "category": "public.app-category.utilities",

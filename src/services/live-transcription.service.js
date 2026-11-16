@@ -32,6 +32,9 @@ class LiveTranscription extends EventEmitter {
     this.pendingAudio = [];
     this.audioStarted = false;
     this.pendingCommits = 0;
+    this.commitCount = 0;
+    this.finalizedCount = 0;
+    this.commitContexts = [];
   }
 
   connect() {
@@ -89,12 +92,25 @@ class LiveTranscription extends EventEmitter {
     const count = Math.floor(buffer.length / 2);
     for (let i = 0; i < count; i++) sum += (buffer.readInt16LE(i * 2) / 32768) ** 2;
     const energy = Math.sqrt(sum / Math.max(1, count));
-    const voiced = energy >= (this.speaking ? 0.0056 : 0.008);
+    if (this.manualSendEnabled) {
+      if (!this.speaking) this.utteranceConversationId = this.conversationId;
+      this.speaking = true; this.audioStarted = true; this.voicedMs += count / 16;
+      this.sendAudio(buffer);
+      // Provider transcription chunks bound buffers; only the user's Send
+      // action submits their assembled transcript to the assistant.
+      if (this.voicedMs >= 15000) this.commit();
+      return;
+    }
+    const floor = this.energyFloor || 0.008;
+    this.noiseFloor = this.noiseFloor ?? Math.min(energy, floor);
+    const voiced = energy >= (this.speaking ? Math.max(floor * .7, this.noiseFloor * 1.6) : Math.max(floor, this.noiseFloor * 2.5));
+    if (!this.speaking && !voiced) this.noiseFloor = this.noiseFloor * .95 + energy * .05;
     if (voiced) {
       this.lastVoiceAt = this.now();
       this.voicedMs += count / 16;
       if (!this.speaking) {
         this.speaking = true;
+        this.utteranceConversationId = this.conversationId;
         this.pendingAudio = this.preRoll;
         this.preRoll = [];
         this.preRollBytes = 0;
@@ -106,7 +122,7 @@ class LiveTranscription extends EventEmitter {
       if (this.audioStarted) this.sendAudio(buffer);
       else {
         this.pendingAudio.push(buffer);
-        if (this.voicedMs >= 150) {
+        if (this.voicedMs >= (this.minVoiceMs || 150)) {
           for (const chunk of this.pendingAudio) this.sendAudio(chunk);
           this.pendingAudio = [];
           this.audioStarted = true;
@@ -119,6 +135,7 @@ class LiveTranscription extends EventEmitter {
       while (this.preRollBytes > 9600 && this.preRoll.length > 1) this.preRollBytes -= this.preRoll.shift().length;
     }
     this.checkSilence();
+    if (this.voicedMs >= 15000) this.commit();
   }
 
   sendAudio(buffer) {
@@ -126,6 +143,7 @@ class LiveTranscription extends EventEmitter {
   }
 
   checkSilence() {
+    if (this.manualSendEnabled) return;
     if (this.speaking && this.now() - this.lastVoiceAt >= this.silenceMs) this.commit();
   }
 
@@ -133,7 +151,10 @@ class LiveTranscription extends EventEmitter {
     if (!this.speaking) return;
     this.speaking = false;
     if (this.audioStarted) {
+      if (this.pendingCommits >= 8) { this.emit('error', new Error('Transcription queue is full. Restart listening.')); return; }
       this.pendingCommits++;
+      this.commitCount++;
+      this.commitContexts.push(this.utteranceConversationId);
       this.send({ type: 'input_audio_buffer.commit' });
     }
     this.voicedMs = 0;
@@ -147,7 +168,7 @@ class LiveTranscription extends EventEmitter {
       'conversation.item.input_audio_transcription.delta', 'conversation.item.input_audio_transcription.completed',
       'conversation.item.input_audio_transcription.failed'];
     if (!id || !relevant.includes(event.type)) return;
-    if (!this.items.has(id)) { this.items.set(id, { text: '', done: false }); this.order.push(id); }
+    if (!this.items.has(id)) { this.items.set(id, { text: '', done: false, conversationId: this.commitContexts.shift() }); this.order.push(id); }
     const item = this.items.get(id);
     if (item.done) return;
     if (event.type.endsWith('.delta')) {
@@ -159,10 +180,13 @@ class LiveTranscription extends EventEmitter {
       item.done = true;
       if (event.type.endsWith('.failed')) this.emit('error', new Error(event.error?.message || 'Could not transcribe speech'));
       while (this.order.length && this.items.get(this.order[0]).done) {
-        const next = this.items.get(this.order.shift());
+        const nextId = this.order.shift();
+        const next = this.items.get(nextId);
         this.pendingCommits = Math.max(0, this.pendingCommits - 1);
+        this.finalizedCount++;
         this.emit('interim', '');
-        if (next.text.trim()) this.emit('transcription', next.text.trim(), { committed: true });
+        if (next.text.trim()) this.emit('transcription', next.text.trim(), { committed: true, utteranceId: nextId, conversationId: next.conversationId });
+        this.emit('finalized');
       }
       // Retain IDs of recent completed items to ignore duplicate server events.
       if (this.items.size > 100) for (const [key, value] of this.items) {
@@ -182,6 +206,27 @@ class LiveTranscription extends EventEmitter {
       this.once('drained', done);
     });
     this.close();
+  }
+
+  async flush() {
+    if (this.flushPromise) return this.flushPromise;
+    this.commit();
+    if (!this.pendingCommits) return;
+    const target = this.commitCount;
+    this.flushPromise = new Promise((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timeout); this.off('finalized', done); this.off('error', fail); this.flushPromise = null; };
+      const done = () => { if (this.finalizedCount >= target) { cleanup(); resolve(); } };
+      const fail = error => { cleanup(); reject(error); };
+      const timeout = setTimeout(() => fail(new Error('Timed out waiting for the final transcript. Listening remains enabled.')), 15000);
+      this.on('finalized', done); this.once('error', fail);
+    });
+    return this.flushPromise;
+  }
+
+  discardPending() {
+    this.speaking = false; this.audioStarted = false; this.voicedMs = 0;
+    this.pendingAudio = []; this.preRoll = []; this.preRollBytes = 0;
+    this.send({ type: 'input_audio_buffer.clear' });
   }
 
   close() {

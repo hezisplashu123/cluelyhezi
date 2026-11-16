@@ -20,7 +20,7 @@ test('preserves instructions, conversation roles, and screenshot data', () => {
   assert.equal(request.input[1].content[1].image_url, 'data:image/png;base64,abc');
   assert.equal(request.max_output_tokens, 1000);
   assert.equal(request.model, 'gpt-6-luna');
-  assert.equal(request.reasoning.effort, 'none');
+  assert.equal(request.reasoning.effort, 'low');
   assert.equal(request.store, false);
   assert.equal(request.generationConfig, undefined);
 });
@@ -45,7 +45,7 @@ test('streams deltas and rejects incomplete answers', async () => {
   } finally { service.client = originalClient; }
 });
 
-test('screenshot batches use mini without changing concurrent text routing', async () => {
+test('screenshot batches use Luna without changing concurrent text routing', async () => {
   const originalClient = service.client;
   const requests = [];
   try {
@@ -60,11 +60,11 @@ test('screenshot batches use mini without changing concurrent text routing', asy
       service.processTextWithSkillStream('Explain arrays', 'dsa')
     ]);
     const imageRequest = requests.find(request => request.input.some(message => message.content.some(part => part.type === 'input_image')));
-    assert.equal(imageRequest.model, 'gpt-5.4-mini');
+    assert.equal(imageRequest.model, 'gpt-6-luna');
     assert.equal(imageRequest.reasoning.effort, 'low');
     assert.equal(imageRequest.input[0].content.filter(part => part.type === 'input_image').length, 2);
     assert.equal(requests.find(request => request !== imageRequest).model, 'gpt-6-luna');
-    assert.equal(requests.find(request => request !== imageRequest).reasoning.effort, 'none');
+    assert.equal(requests.find(request => request !== imageRequest).reasoning.effort, 'low');
     assert.equal(result.metadata.imageCount, 2);
     service.client.responses.create = async () => { throw new Error('offline'); };
     await assert.rejects(service.processImageWithSkill(images, 'image/png', 'dsa'), /offline/);
@@ -87,7 +87,7 @@ test('maps purpose descriptions by line number without allowing the model to rew
     assert.equal(await service.ensureCodeAnnotations(plain, {}), annotated);
     assert.equal(sidecarRequest.text.format.type, 'json_schema');
     assert.equal(sidecarRequest.model, 'gpt-6-luna');
-    assert.equal(sidecarRequest.reasoning.effort, 'none');
+    assert.equal(sidecarRequest.reasoning.effort, 'low');
     const descriptionInput = JSON.parse(sidecarRequest.input[0].content[0].text);
     assert.equal(descriptionInput.requestedLines[0].focus, 'problem_goal');
     assert.equal(descriptionInput.requestedLines[1].focus, 'step_purpose');

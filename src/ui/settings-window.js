@@ -349,13 +349,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!resumeStatus) return;
         resumeStatus.classList.toggle('error', !!status?.error);
         if (!status?.configured) {
-            resumeStatus.textContent = 'No resume background is saved.';
+            resumeStatus.textContent = 'Resume context not configured. Personalization is limited.';
         } else if (status.error) {
             resumeStatus.textContent = status.error;
         } else {
             const tokens = Number(status.estimatedTokens || 0).toLocaleString();
             const sizeKb = Math.max(1, Math.ceil(Number(status.bytes || 0) / 1024));
-            resumeStatus.textContent = `Loaded ${sizeKb} KB · about ${tokens} extra input tokens per answer.`;
+            resumeStatus.textContent = `Resume context loaded: ${sizeKb} KB · about ${tokens} extra input tokens per answer.`;
         }
     };
 

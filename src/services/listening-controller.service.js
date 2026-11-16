@@ -91,6 +91,14 @@ class ListeningController extends EventEmitter {
     return this._enqueue(() => this._stopInternal(false));
   }
 
+  pauseCaptureForSend() {
+    this.desiredOn = false;
+    this._blockAudioImmediately('Finalizing recording.');
+    this.speech.pauseCapture?.();
+    this.emit('capture-stopped');
+    if (this.state !== STATES.OFF) this._setState(STATES.STOPPING);
+  }
+
   _blockAudioImmediately(reason, code = 'LISTENING_CANCELLED') {
     this.acceptAudio = false;
     if (this._startAbort) {
@@ -220,7 +228,10 @@ class ListeningController extends EventEmitter {
       label: String(details.label || 'Windows default microphone'),
       deviceId: details.deviceId ? String(details.deviceId) : null,
       sampleRate: Number(details.sampleRate) || null,
-      channelCount: Number(details.channelCount) || null
+      channelCount: Number(details.channelCount) || null,
+      noiseSuppression: typeof details.noiseSuppression === 'boolean' ? details.noiseSuppression : null,
+      echoCancellation: typeof details.echoCancellation === 'boolean' ? details.echoCancellation : null,
+      autoGainControl: typeof details.autoGainControl === 'boolean' ? details.autoGainControl : null
     };
     this._publish();
     return true;

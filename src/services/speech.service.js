@@ -549,6 +549,7 @@ class SpeechService extends EventEmitter {
   }
 
   startRecording({ source = 'desktop' } = {}) {
+    this.capturePaused = false; this._azureAudioBytes = 0; this._azurePending = false; this._azureConversationId = this.conversationId;
     try {
       if (!this.available) {
         const errorMsg = `Speech provider "${this.provider}" is not available`;
@@ -600,9 +601,10 @@ class SpeechService extends EventEmitter {
     this._cleanup();
     const live = new LiveTranscription({ apiKey: process.env.OPENAI_API_KEY });
     this.liveTranscription = live;
+    live.manualSendEnabled = this.manualSendEnabled;
     this.isRecording = true;
     live.on('interim', text => this.emit('interim-transcription', text));
-    live.on('transcription', (text, metadata) => this.emit('transcription', text, metadata));
+    live.on('transcription', (text, metadata) => { this.lastTranscription = text; this.emit('transcription', text, metadata); });
     live.on('error', error => {
       if (this.liveTranscription !== live) return;
       this.emit('error', error.message);
@@ -653,6 +655,8 @@ class SpeechService extends EventEmitter {
     this.recognizer.recognizing = (s, e) => {
       try {
         if (e.result.reason === sdk.ResultReason.RecognizingSpeech) {
+          if (!this._azurePending) this._azureConversationId = this.conversationId;
+          this._azurePending = true;
           this.emit('interim-transcription', e.result.text);
         }
       } catch (error) {
@@ -663,8 +667,11 @@ class SpeechService extends EventEmitter {
     this.recognizer.recognized = (s, e) => {
       try {
         if (e.result.reason === sdk.ResultReason.RecognizedSpeech && e.result.text && e.result.text.trim()) {
-          this.emit('transcription', e.result.text);
+          this.lastTranscription = e.result.text;
+          this.emit('transcription', e.result.text, { utteranceId: e.result.resultId, conversationId: this._azureConversationId || this.conversationId });
         }
+        this._azurePending = false; this._azureAudioBytes = 0;
+        this.emit('azure-final');
       } catch (error) {
         logger.error('Error in recognized handler', { error: error.message });
       }
@@ -813,7 +820,7 @@ class SpeechService extends EventEmitter {
       clearInterval(this.segmentTimer);
     }
     this.segmentTimer = setInterval(() => {
-      if (!this.isRecording || this.provider !== 'whisper') {
+      if (!this.isRecording || this.provider !== 'whisper' || this.manualSendEnabled) {
         return;
       }
 
@@ -867,10 +874,23 @@ class SpeechService extends EventEmitter {
 
   // This is the only provider-facing PCM sink.
   _forwardPcm(buffer) {
+    if (this.capturePaused) return;
+    this.inputLevel = this._chunkRmsEnergy(buffer);
+    if (this._azureFinalizing) {
+      this._azureHeldBytes = (this._azureHeldBytes || 0) + buffer.length;
+      if (this._azureHeldBytes <= 960000) this._azureHeld.push(buffer);
+      else this.emit('error', 'Azure finalization buffer exceeded 30 seconds.');
+      return;
+    }
     if (this.provider === 'openai') {
       if (!this._audioDataLogged) {
         this._audioDataLogged = true;
         logger.info('Streaming computer audio for live transcription', { sampleRate: 16000, bytesPerChunk: buffer.length });
+      }
+      if (this.liveTranscription) {
+        this.liveTranscription.conversationId = this.conversationId;
+        this.liveTranscription.energyFloor = this._getVadEnergyFloor();
+        this.liveTranscription.minVoiceMs = this.audioPreset === 'noisy_room' ? 300 : this.audioPreset === 'high_sensitivity' ? 100 : 150;
       }
       this.liveTranscription?.append(buffer);
       return;
@@ -882,6 +902,7 @@ class SpeechService extends EventEmitter {
       });
     }
     if (this.provider === 'azure' && this.pushStream) {
+      this._azureAudioBytes = (this._azureAudioBytes || 0) + buffer.length;
       this.pushStream.write(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
     } else if (this.provider === 'whisper') {
       this._ingestWhisperAudio(buffer);
@@ -912,17 +933,22 @@ class SpeechService extends EventEmitter {
    * buffering when VAD is disabled.
    */
   _ingestWhisperAudio(buffer) {
+    if (!this.segmentBytes) this.segmentConversationId = this.conversationId;
     if (!buffer || !buffer.length) {
       return;
     }
 
-    if (this._isManualCaptureMode()) {
+    if (this.manualSendEnabled || this._isManualCaptureMode()) {
       this.segmentBuffers.push(buffer);
       this.segmentBytes += buffer.length;
       this.vadLastChunkAt = Date.now();
 
       const capturedMs = this.segmentBytes / 32;
-      if (!this.manualStopRequested && capturedMs >= this._getManualCaptureMaxMs()) {
+      if (this.manualSendEnabled && capturedMs >= 15000) {
+        // Fixed-size transcription chunks bound memory. They never stop capture
+        // or submit to the assistant; the user's Send button owns submission.
+        this._flushWhisperSegment({ final: false }).catch(error => this.emit('error', error.message));
+      } else if (!this.manualSendEnabled && !this.manualStopRequested && capturedMs >= this._getManualCaptureMaxMs()) {
         this.manualStopRequested = true;
         this.emit('status', 'Maximum recording duration reached; processing audio');
         setImmediate(() => this.stopRecording());
@@ -1061,24 +1087,20 @@ class SpeechService extends EventEmitter {
     });
 
     if (this.provider === 'azure' && this.recognizer) {
-      if (discardPending && this.pushStream?.close) {
-        try { this.pushStream.close(); } catch (_) {}
-      }
-      try {
-        this.recognizer.stopContinuousRecognitionAsync(
-          () => {
-            this._finalizeStop('Recording stopped');
-          },
-          (error) => {
-            logger.error('Error during recognition stop', { error: error.toString() });
-            this._finalizeStop('Recording stopped');
-          }
-        );
-      } catch (error) {
-        logger.error('Error stopping recognizer', { error: error.message });
-        this._finalizeStop('Recording stopped');
-      }
-      return;
+      const recognizer = this.recognizer;
+      if (discardPending && this.pushStream?.close) { try { this.pushStream.close(); } catch (_) {} }
+      return new Promise(resolve => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true; clearTimeout(timer);
+          if (this.recognizer === recognizer) this._finalizeStop('Recording stopped');
+          resolve();
+        };
+        const timer = setTimeout(finish, 5000);
+        try { recognizer.stopContinuousRecognitionAsync(finish, error => { logger.error('Error during recognition stop', { error: String(error) }); finish(); }); }
+        catch (error) { logger.error('Error stopping recognizer', { error: error.message }); finish(); }
+      });
     }
 
     if (this.provider === 'whisper') {
@@ -1288,6 +1310,57 @@ class SpeechService extends EventEmitter {
     return { success: false, message: 'Speech service not initialized' };
   }
 
+  setAudioPreset(preset) {
+    if (!['standard','noisy_room','high_sensitivity'].includes(preset)) throw new Error('Unknown audio preset.');
+    this.audioPreset = preset;
+    const store = require('./conversation-store.service');
+    if (store.db) store.setMeta('audio_preset', preset);
+    return { preset };
+  }
+
+  pauseCapture() {
+    this.capturePaused = true;
+    if (this.recording) { try { this.recording.stop(); } catch (_) {} this.recording = null; }
+  }
+
+  hasPendingSpeech() {
+    return !!(this.segmentBytes || this.transcriptionInFlight || this.liveTranscription?.speaking || this.liveTranscription?.pendingCommits || this._azurePending);
+  }
+
+  discardPendingSpeech() {
+    this.segmentBuffers = []; this.segmentBytes = 0; this._resetVadState();
+    this.liveTranscription?.discardPending();
+  }
+
+  async finalizePendingSpeech() {
+    if (this.provider === 'openai') return this.liveTranscription?.flush();
+    if (this.provider === 'whisper') {
+      const pending = this._flushWhisperSegment({ final: false });
+      this._resetVadState();
+      return pending;
+    }
+    if (this.provider === 'azure' && (this._azurePending || this._azureAudioBytes >= 3200) && this.pushStream) {
+      // Azure's push recognizer has no client commit event. Supply a silence
+      // boundary and await its final result; capture continues into a bounded queue.
+      this._azureFinalizing = true; this._azureHeld = []; this._azureHeldBytes = 0;
+      try {
+        await new Promise((resolve, reject) => {
+          const cleanup = () => { clearTimeout(timer); this.off('azure-final', done); this.off('error', fail); };
+          const done = () => { cleanup(); resolve(); };
+          const fail = error => { cleanup(); reject(new Error(String(error))); };
+          const timer = setTimeout(() => fail('Azure did not finalize speech within 15 seconds.'), 15000);
+          this.once('azure-final', done); this.once('error', fail);
+          const silence = Buffer.alloc(32000);
+          this.pushStream.write(silence.buffer.slice(silence.byteOffset, silence.byteOffset + silence.byteLength));
+        });
+      } finally {
+        this._azureFinalizing = false;
+        const held = this._azureHeld; this._azureHeld = [];
+        for (const chunk of held) this._forwardPcm(chunk);
+      }
+    }
+  }
+
   getStatus() {
     return {
       provider: this.provider,
@@ -1295,6 +1368,7 @@ class SpeechService extends EventEmitter {
       captureSource: this.captureSource,
       isProcessingAudio: this.isProcessingAudio,
       isInitialized: this.provider === 'openai' ? this.available : this.provider === 'azure' ? !!this.speechConfig : !!this.whisperCommand,
+      diagnostics: { inputLevel: this.inputLevel || 0, voiceActive: this.vadSpeaking || this.liveTranscription?.speaking || this._azurePending || false, pendingBytes: this.segmentBytes || 0, queuedSegments: this._queuedSegments || 0, preset: this.audioPreset || 'standard', lastTranscription: this.lastTranscription || '', captureError: this.lastCaptureError || null },
       sessionDuration: this.sessionStartTime ? Date.now() - this.sessionStartTime : 0,
       retryCount: this.retryCount,
       effectiveSettings: {
@@ -1305,7 +1379,7 @@ class SpeechService extends EventEmitter {
         whisperModelDir: this._getWhisperModelDir(),
         whisperModel: this._getWhisperModel(),
         whisperLanguage: this._getWhisperLanguage(),
-        whisperCaptureMode: this._getWhisperCaptureMode(),
+        whisperCaptureMode: this.manualSendEnabled ? 'manual' : this._getWhisperCaptureMode(),
         whisperDevice: this._getWhisperDevice(),
         whisperSegmentMs: String(this._getWhisperSegmentMs())
       },
@@ -1436,6 +1510,8 @@ class SpeechService extends EventEmitter {
   }
 
   _getMinUtteranceMs() {
+    if (this.audioPreset === 'noisy_room') return 450;
+    if (this.audioPreset === 'high_sensitivity') return 250;
     return this._vadNumber('whisperMinUtteranceMs', 'WHISPER_MIN_UTTERANCE_MS', 'speech.whisper.minUtteranceMs', 350, 100);
   }
 
@@ -1448,6 +1524,8 @@ class SpeechService extends EventEmitter {
   }
 
   _getVadEnergyFloor() {
+    if (this.audioPreset === 'noisy_room') return 0.014;
+    if (this.audioPreset === 'high_sensitivity') return 0.004;
     return this._vadNumber('whisperVadEnergyFloor', 'WHISPER_VAD_ENERGY_FLOOR', 'speech.whisper.vadEnergyFloor', 0.008, 0.0005);
   }
 
@@ -1929,48 +2007,26 @@ class SpeechService extends EventEmitter {
     this._forwardPcm(buffer);
   }
 
-  async _flushWhisperSegment({ final }) {
-    if (this.transcriptionInFlight) {
-      // A flush was requested while a transcription is still running. Record
-      // that we owe a follow-up flush for ANY request (not just a final one),
-      // otherwise an utterance that ended mid-transcription stays stranded in
-      // the buffer until the next utterance ends or the session stops. Track
-      // final-ness separately so a queued stop still finalises correctly.
-      this.pendingFlush = true;
-      if (final) {
-        this.pendingFinal = true;
-      }
-      return;
-    }
-
-    if (!this.segmentBytes) {
-      return;
-    }
-
+  _flushWhisperSegment({ final } = {}) {
+    if (!this.segmentBytes) return this._flushPromise || Promise.resolve();
+    if ((this._queuedSegments || 0) >= 8) return Promise.reject(new Error('Transcription queue is full.'));
     const audioBuffer = Buffer.concat(this.segmentBuffers, this.segmentBytes);
-    this.segmentBuffers = [];
-    this.segmentBytes = 0;
-
-    this.transcriptionInFlight = true;
-
-    try {
-      const transcript = await this._transcribeWhisperBuffer(audioBuffer);
-      const clean = transcript ? transcript.trim() : '';
-      if (clean && !this._isHallucinatedTranscript(clean)) {
-        this.emit('transcription', clean);
-      } else if (clean) {
-        logger.debug('Dropped likely Whisper silence hallucination', { transcript: clean });
-      }
-    } finally {
-      this.transcriptionInFlight = false;
-
-      if (this.pendingFlush) {
-        this.pendingFlush = false;
-        const runFinal = this.pendingFinal;
-        this.pendingFinal = false;
-        await this._flushWhisperSegment({ final: runFinal });
-      }
-    }
+    const metadata = { utteranceId: require('crypto').randomUUID(), conversationId: this.segmentConversationId || this.conversationId };
+    this.segmentBuffers = []; this.segmentBytes = 0; this.segmentConversationId = null;
+    this._queuedSegments = (this._queuedSegments || 0) + 1;
+    const next = (this._flushPromise || Promise.resolve()).catch(() => {}).then(async () => {
+      this.transcriptionInFlight = true;
+      try {
+        const transcript = await this._transcribeWhisperBuffer(audioBuffer);
+        const clean = transcript?.trim();
+        if (clean && !this._isHallucinatedTranscript(clean)) {
+          this.lastTranscription = clean;
+          this.emit('transcription', clean, metadata);
+        }
+      } finally { this._queuedSegments--; this.transcriptionInFlight = this._queuedSegments > 0; }
+    });
+    this._flushPromise = next;
+    return next;
   }
 
   /**

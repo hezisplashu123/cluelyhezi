@@ -717,7 +717,10 @@ class MainWindowUI {
                 label: activeTrack.label || (captureSource === 'microphone' ? 'Windows default microphone' : 'System audio'),
                 deviceId: activeSettings.deviceId || null,
                 sampleRate: activeSettings.sampleRate || null,
-                channelCount: activeSettings.channelCount || null
+                channelCount: activeSettings.channelCount || null,
+                noiseSuppression: activeSettings.noiseSuppression ?? null,
+                echoCancellation: activeSettings.echoCancellation ?? null,
+                autoGainControl: activeSettings.autoGainControl ?? null
             });
             stream.getAudioTracks().forEach(track => {
                 track.onended = () => {
@@ -753,7 +756,11 @@ class MainWindowUI {
                 if (pcm16.length) window.electronAPI.sendAudioChunk(this.listeningSessionId, pcm16.buffer);
             };
 
-            mediaSource.connect(scriptNode);
+            if (!systemAudio) {
+                const highPass = audioContext.createBiquadFilter();
+                highPass.type = 'highpass'; highPass.frequency.value = 80; highPass.Q.value = 0.707;
+                mediaSource.connect(highPass); highPass.connect(scriptNode);
+            } else mediaSource.connect(scriptNode);
             // Keep processing active without replaying captured audio into the
             // speakers, which would feed it back into system loopback.
             const silentGain = audioContext.createGain();

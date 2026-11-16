@@ -393,6 +393,7 @@
       <div class="command-item" id="micButton" title="Toggle computer audio listening" aria-label="Toggle computer audio listening">
         <i class="fas fa-volume-high"></i>
       </div>
+      <button type="button" class="command-item" id="sendRecordedSpeech" style="background:#15803d;color:white" title="Stop listening and send the recording to AI">Send</button>
       <div class="command-separator"></div>
       <div class="command-item" id="answerWindowsButton" title="Open answer and code windows">
         <i class="fas fa-window-restore"></i>
@@ -407,6 +408,7 @@
         <i class="fas fa-brain"></i>
         <span>DSA</span>
       </div>
+      <select class="command-item" id="assistantModeSelect" aria-label="Assistant mode" title="Normal: Luna Low. STAR and Case: GPT-6.1 Sol Medium." style="-webkit-app-region:no-drag;color:white;background:#111827;max-width:95px;padding:4px;border:1px solid #334155"><option value="normal">Normal</option><option value="behavioral_star">STAR</option><option value="case_interview">Case</option></select>
       <div class="command-separator"></div>
       <div class="command-item" id="languageSelector">
         <i class="fas fa-code"></i>
@@ -465,5 +467,6 @@
 
     <script src="./src/ui/pcm-resampler.js"></script>
     <script src="./src/ui/main-window.js"></script>
+    <script src="./src/ui/assistant-controls.js"></script>
   </body>
 </html>

@@ -21,6 +21,40 @@ const pcm = (ms, value = 10000) => {
 };
 const commits = live => live.socket.sent.filter(event => event.type === 'input_audio_buffer.commit').length;
 
+test('manual listening ignores silence boundaries until Send finalizes the recording', async () => {
+  let now = 0;
+  const live = new LiveTranscription({ apiKey: 'test', Socket, now: () => now });
+  live.manualSendEnabled = true;
+  await live.connect();
+  try {
+    live.append(pcm(400)); now = 10000; live.append(pcm(3000,0)); live.checkSilence();
+    assert.equal(commits(live),0, 'Silence must not end the recording');
+    assert.equal(live.ready,true);
+    const sent = live.flush(); assert.equal(commits(live),1);
+    live.handleEvent({ type: 'input_audio_buffer.committed', item_id: 'manual-recording' });
+    live.handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'manual-recording', transcript: 'One recorded question' });
+    await sent;
+  } finally { live.close(); }
+});
+
+test('manual commit waits for final transcript, submits once and continues streaming capture', async () => {
+  const live = new LiveTranscription({ apiKey: 'test', Socket }); await live.connect();
+  try {
+    live.conversationId = 'first'; live.append(pcm(200));
+    const one = live.flush(), two = live.flush();
+    assert.equal(commits(live),1); assert.equal(live.ready,true);
+    let final;
+    live.on('transcription', (text, metadata) => { final = { text, metadata }; });
+    live.conversationId = 'second';
+    live.handleEvent({ type: 'input_audio_buffer.committed', item_id: 'manual-one' });
+    live.handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'manual-one', transcript: 'Complete question' });
+    await Promise.all([one,two]);
+    assert.equal(final.text,'Complete question'); assert.equal(final.metadata.conversationId,'first');
+    assert.equal(final.metadata.utteranceId,'manual-one');
+    live.append(pcm(200)); live.commit(); assert.equal(commits(live),2);
+  } finally { live.close(); }
+});
+
 test('streams audio immediately, waits 1.5 seconds, and resets the pause when speech resumes', async () => {
   let now = 0;
   const live = new LiveTranscription({ apiKey: 'test', Socket, now: () => now });

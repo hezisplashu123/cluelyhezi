@@ -9,7 +9,15 @@
     "plugins": [
       "expo-router",
       "expo-secure-store",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Select images to attach to your OpenCluely conversation.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ]
     ],
     "ios": {
       "supportsTablet": true,

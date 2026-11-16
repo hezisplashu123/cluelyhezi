@@ -711,6 +711,7 @@
       </div>
     </div>
     <script src="lib/markdown.js"></script>
+    <script src="lib/plain-response.js"></script>
     <script src="lib/mathrender.js"></script>
     <!-- PrismJS core and autoloader for language components -->
     <script src="./node_modules/prismjs/prism.min.js"></script>
@@ -887,6 +888,7 @@
       // Markdown formatter using markdown.js library
       function formatMarkdown(text) {
         if (!text) return '';
+        if (window.plainResponse) return window.plainResponse.toHtml(text);
         
         try {
           if (typeof markdown !== 'undefined' && markdown.toHTML) {

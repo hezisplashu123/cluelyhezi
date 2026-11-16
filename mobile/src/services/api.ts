@@ -1,3 +1,6 @@
+import { fetch as expoFetch } from 'expo/fetch';
+import { File as LocalFile } from 'expo-file-system';
+import { Platform } from 'react-native';
 import type { DesktopConfig, DesktopState, Message, VoiceRecognitionStatus } from '../types/protocol';
 
 export class DesktopApiError extends Error {
@@ -22,6 +25,24 @@ async function request<T>(config: DesktopConfig | null, path: string, init: Requ
 }
 
 export const api = {
+  uploadImage: async (c: DesktopConfig, image: { uri: string; fileName?: string | null; mimeType?: string | null; file?: File }, conversationId: string, requestId: string) => {
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 60000);
+    try {
+      // Expo fetch accepts Blob/File bytes, not React Native's legacy { uri, name, type } parts.
+      // ImagePicker supplies a browser File on web and a local file URI on native.
+      const file = Platform.OS === 'web'
+        ? image.file || await (await expoFetch(image.uri, { signal: controller.signal })).blob()
+        : new LocalFile(image.uri);
+      const form = new FormData();
+      form.append('conversationId', conversationId); form.append('requestId', requestId);
+      const filename = image.fileName || ('name' in file && typeof file.name === 'string' ? file.name : 'image');
+      form.append('image', file, filename);
+      const response = await expoFetch(`${c.baseUrl}/api/v1/attachments`, { method: 'POST', headers: { Authorization: `Bearer ${c.token}` }, body: form, signal: controller.signal });
+      const body = await response.json();
+      if (!response.ok || !body.success) throw new Error(body.error?.message || 'Image upload failed.');
+      return body.data as import('../types/protocol').Attachment;
+    } finally { clearTimeout(timer); }
+  },
   login: async (baseUrl: string, password: string) => {
     const response = await fetch(`${baseUrl}/api/v1/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password, deviceName: 'Phone' }) });
     const body = await response.json();

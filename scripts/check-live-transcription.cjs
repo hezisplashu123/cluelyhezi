@@ -7,7 +7,7 @@ const os = require('os');
 const { LiveTranscription } = require('../src/services/live-transcription.service');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 (async () => {
-  const wave = fs.readFileSync(path.join(os.tmpdir(), 'opencluely-live-fixture.wav'));
+  const wave = fs.readFileSync(process.env.LIVE_TRANSCRIPTION_FIXTURE || path.join(os.tmpdir(), 'opencluely-live-fixture.wav'));
   let audio;
   for (let offset = 12; offset + 8 <= wave.length;) {
     const size = wave.readUInt32LE(offset + 4);
@@ -16,6 +16,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   }
   assert.ok(audio?.length);
   const live = new LiveTranscription({ apiKey: process.env.OPENAI_API_KEY });
+  live.manualSendEnabled = true;
   let interimBeforeCommit = false;
   let commits = 0;
   const fail = new Promise((_, reject) => live.on('error', reject));
@@ -33,11 +34,13 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       }
       for (let i = 0; i < 30; i++) { live.append(Buffer.alloc(2048)); await delay(64); }
     })();
-    const transcript = await Promise.race([final, fail]);
     await feeding;
+    assert.equal(commits, 0, 'Pauses must not finalize manual recordings');
+    await Promise.race([live.flush(), fail]);
+    const transcript = await Promise.race([final, fail]);
     assert.match(transcript, /binary|search/i);
     assert.equal(commits, 1);
-    assert.ok(interimBeforeCommit, 'Words must arrive while speech is still streaming');
-    console.log(JSON.stringify({ success: true, interimBeforeCommit, commits, transcript }));
+    assert.ok(live.ready, 'Provider remains available until the controller stops it after finalization');
+    console.log(JSON.stringify({ success: true, manualFinalization: true, interimBeforeCommit, commits, transcript }));
   } finally { clearTimeout(timeout); live.close(); }
 })().catch(error => { console.error(error.message); process.exitCode = 1; });

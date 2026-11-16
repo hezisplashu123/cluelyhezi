@@ -7,6 +7,7 @@
     <script src="lib/markdown.js"></script>
     <script src="lib/mathrender.js"></script>
     <script src="lib/response-parts.js"></script>
+    <script src="lib/plain-response.js"></script>
     <style>
         .text-white { color: white; }
         .text-gray-300 { color: #d1d5db; }
@@ -709,6 +710,7 @@
         }
 
         function renderMarkdown(text) {
+            if (window.plainResponse) return window.plainResponse.toHtml(text);
             if (typeof marked !== 'undefined') {
                 return marked.parse ? marked.parse(text) : marked(text);
             }
